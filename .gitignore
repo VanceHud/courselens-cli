@@ -1,0 +1,9 @@
+.dart_tool/
+build/
+pubspec.lock
+node_modules/
+.wrangler/
+.dev.vars
+wrangler.toml
+*.log
+.DS_Store

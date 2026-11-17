@@ -1,0 +1,12 @@
+name: courselens
+description: 将高校教务系统接入 AI 助手的开源 CLI：纯 Dart 协议核心 + Agent Skill + 自托管会话网关。
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ^3.11.0
+
+dependencies:
+  charset: ^2.0.1
+  html: ^0.15.7
+  http: ^1.6.0

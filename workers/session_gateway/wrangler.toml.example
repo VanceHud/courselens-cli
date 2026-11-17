@@ -1,0 +1,41 @@
+# CourseLens 有状态会话网关 —— 部署配置示例
+# 用法：复制为 wrangler.toml 后按注释改成你自己的值，再执行
+#   npx wrangler deploy
+# 敏感信息不要写进这个文件，用 wrangler secret put 注入（见文件末尾）。
+
+name = "courselens-session"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+# 会话保险库 Durable Object（SQLite 存储，Cookie 加密落盘）
+[durable_objects]
+bindings = [
+  { name = "SESSION_VAULT", class_name = "PortalSessionVault" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PortalSessionVault"]
+
+# 非敏感配置（vars）。按你的学校修改：
+[vars]
+# 教务系统根地址（新正方示例）
+PORTAL_URL = "https://jwglxt.example.edu.cn/jwglxt"
+# 教务系统类型：ZF（新正方）/ ZF_OLD / QZ / QZ_OLD
+PORTAL_SYSTEM = "ZF"
+# 教务账号（学号）。密码不要写这里，用 secret 注入 PORTAL_PASSWORD
+PORTAL_USERNAME = "your-student-id"
+# 走 CAS 统一认证的学校再填这一项
+# PORTAL_CAS_URL = "https://cas.example.edu.cn"
+# 允许访问的上游主机白名单（逗号分隔，SSRF 防护）
+ALLOWED_HOSTS = "jwglxt.example.edu.cn"
+# CORS 来源（只给自己的客户端域名，没有可留空）
+CORS_ORIGIN = ""
+# 保活策略：0 = 懒保活（无请求时零唤醒、零上游请求），>0 = 定时保活间隔秒数
+KEEPALIVE_INTERVAL_SEC = "0"
+# 会话探活缓存秒数（窗口内不重复向上游探活）
+SESSION_VERIFY_TTL_SEC = "120"
+
+# 敏感信息用以下命令注入，不要写进配置文件、不要提交进仓库：
+#   npx wrangler secret put COURSELENS_API_KEY   # 客户端访问网关用的 API key（自拟长随机串）
+#   npx wrangler secret put PORTAL_PASSWORD      # 你的教务密码（只存在你自己的 Worker 里）
