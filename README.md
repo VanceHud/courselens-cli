@@ -21,6 +21,38 @@
 
 大多数学校填入教务地址即可自动识别接入；为学校新增预设模板与作息的方法见 [高校适配指南](docs/school-adaptation.md)。
 
+## 最快的方式：把下面这段提示词发给你的 AI Agent
+
+如果你在用 Claude Code、Codex、Cline、Muse 这类能操作你电脑的 AI 助手，不用自己敲命令——把下面整段复制发给它，它会自己完成安装、接入你的教务账号，并验证到能查出真实课表为止：
+
+```text
+请帮我安装并接入 CourseLens CLI（一个把高校教务系统接入 AI 助手的开源工具），全程按下面步骤做，每步做完向我汇报结果，遇到需要我决定的地方停下来问我：
+
+1. 克隆仓库到 ~/.local/share/courselens-cli：
+   git clone https://github.com/VanceHud/courselens-cli.git ~/.local/share/courselens-cli
+   （如果克隆失败，先告诉我失败原因，不要换来源。）
+2. 检查 Dart SDK：运行 dart --version；没有就从 dart.dev 官方渠道安装稳定版 Dart SDK 到 ~/.local/share/dart-sdk 并加入 PATH，然后再次验证。
+3. 编译并安装 CLI：
+   cd ~/.local/share/courselens-cli && dart pub get && dart compile exe tools/courselens_cli.dart -o build/courselens
+   把 build/courselens 软链到 ~/.local/bin/courselens（目录不存在就建），然后运行 courselens --version 和 courselens --demo today 验证可用。
+4. 安装配套的 Agent Skill：把仓库里的 .agents/skills/courselens-cli 整个目录软链（优先）或复制到你自己的技能目录（Claude Code 是 ~/.claude/skills，Codex 是 ~/.codex/skills 或 ~/.agents/skills；你判断不出自己是哪种就问我）。然后完整读一遍其中的 SKILL.md，并读仓库的 README.md 和 docs/cli-and-agent-skill.md，之后所有教务操作都按 Skill 的规范执行。
+5. 引导我接入教务账号：先问我学校、教务系统地址（URL）和系统类型（ZF/ZF_OLD/QZ/QZ_OLD，不确定就用 auto 探测），然后让我在三种接入方式里选：
+   a) 网关模式（推荐）：在仓库 workers/session_gateway 里把 wrangler.toml.example 复制为 wrangler.toml，用 wrangler 部署到我自己的 Cloudflare 账号；COURSELENS_API_KEY 和 PORTAL_PASSWORD 两个 Secret 由我本人执行 wrangler secret put 输入，你不要经手；部署完成后用 courselens auth worker 把 CLI 绑定到网关。
+   b) Cookie 导入：我在浏览器登录教务后导出 .har 或 Cookie，你用 courselens auth import-cookie 导入。
+   c) 直连模式：你把 courselens auth login 的命令给我，我在自己的终端里交互式输入学号和密码（隐藏输入），你不要让我在聊天里发密码。
+6. 验证接入：运行 courselens whoami（或 auth status）确认会话 ACTIVE，再运行 courselens today，把我的真实今日课表发给我看。
+
+安全红线（必须遵守）：
+- 绝不在聊天里向我索要教务密码，也不要让我把密码、完整 Cookie 或 API key 发在聊天里；这些只能走上面三种正规通道。
+- 任何时候不要在输出、日志或文件里复述我的密码、完整 Cookie 或 API key。
+- 选课/退课（select/drop）必须先不带 --confirm 干跑预检，把课程名、老师、时间和冲突结果发我确认，我明确同意后才加 --confirm 执行；返回 RESULT_UNKNOWN 时严禁用原参数盲目重发，先用 courselens courses 只读核查。
+- 不要修改 Cloudflare 的其他配置，不要动仓库的 git 历史；wrangler 部署只部署这个 Worker 本身。
+
+最后告诉我：以后我想查课表、成绩、考试、空教室，直接跟你说就行；工具升级时运行 courselens update 即可（可先 courselens update --check 只检查不更新）。
+```
+
+手动安装则看下面的快速开始。
+
 ## 快速开始
 
 ### 1. 编译 CLI
