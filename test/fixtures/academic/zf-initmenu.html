@@ -1,0 +1,21 @@
+<!-- 登录后的首页（框架入口）：隐藏表单把会话身份交给前端，
+     导航里必须有「退出」这类已登录特征，否则会被判成没登录成功。 -->
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>教学管理信息服务平台</title>
+  </head>
+  <body>
+    <form id="requestMap" style="display:none;">
+      <input type="hidden" id="login_type" value="" />
+      <input type="hidden" id="gnmkdmKey" value="index" />
+      <input type="hidden" id="sessionUserKey" value="20250001" />
+    </form>
+    <div class="navbar">
+      <a href="javascript:logout();">退出</a>
+      <span>学期理论课表</span>
+      <span>选课结果</span>
+    </div>
+  </body>
+</html>

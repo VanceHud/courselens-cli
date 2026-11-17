@@ -1,0 +1,13 @@
+<!-- 强智（新）选课登录页的最小形态。
+     页内脚本给出 scode 与 sxh：登录参数要按 sxh 逐位把 scode 插进编码结果里。 -->
+<!doctype html>
+<html>
+  <body>
+    <script>var scode = 'abcdefghij'; var sxh = '120000000';</script>
+    <form action="/jsxsd/xk/LoginToXk">
+      <input name="userAccount" />
+      <input name="userPassword" type="password" />
+      <input name="encoded" type="hidden" />
+    </form>
+  </body>
+</html>

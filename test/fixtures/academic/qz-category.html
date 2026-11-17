@@ -1,0 +1,21 @@
+<!-- 强智选课分类页的最小形态（只保留本用例要守的性质）：
+     sfyzmxk 只作为输入控件的 id / name / value 出现 —— 脚本取值的实现不许把
+     控件的属性误认成「一次变量赋值」，否则「要不要验证码」会被判反。
+     注意：本注释里刻意不写出那种赋值形态的字面样子 —— 取值实现是在**原始 HTML**
+     上跑正则的，注释里写出来同样会被匹配到（这一点是实测踩出来的）。 -->
+<!doctype html>
+<html>
+  <body>
+    <form id="categoryForm">
+      <input id="sfyzmxk" name="sfyzmxk" value="0" />
+      <input id="kcxx" value="" />
+      <input id="skls" value="" />
+      <input id="sfym" type="checkbox" />
+      <input id="sfct" type="checkbox" checked />
+    </form>
+    <script>
+      // 对照用：这里有一次真实赋值，证明「真赋值是能被取到的」。
+      var pageReady = 'yes';
+    </script>
+  </body>
+</html>

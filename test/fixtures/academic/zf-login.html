@@ -1,0 +1,13 @@
+<!-- 正方 jwglxt 原生登录页的最小形态。
+     隐藏域里带着 csrftoken；账号是普通文本框，口令框是 type=password。 -->
+<!doctype html>
+<html>
+  <body>
+    <form method="post" action="/jwglxt/xtgl/login_slogin.html">
+      <input type="hidden" name="csrftoken" value="fresh-token" />
+      <input type="hidden" name="mmsfjm" value="0" />
+      <input name="yhm" />
+      <input name="mm" type="password" />
+    </form>
+  </body>
+</html>

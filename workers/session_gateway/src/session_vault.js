@@ -938,10 +938,15 @@ export class PortalSessionVault {
   async _handleUpdateMonitor(request, config) {
     await this._ensureHydrated(config);
     const body = await this._readJsonBody(request);
-    if (body.grades && typeof body.grades === "object") {
+    const hasGradesObj = Boolean(body.grades && typeof body.grades === "object");
+    const hasExamsObj = Boolean(body.exams && typeof body.exams === "object");
+    const targetsGrades = hasGradesObj || body.gradesEnabled !== undefined;
+    const targetsExams = hasExamsObj || body.examsEnabled !== undefined;
+
+    if (hasGradesObj) {
       this._applySingleMonitorPatch("grades", body.grades);
     }
-    if (body.exams && typeof body.exams === "object") {
+    if (hasExamsObj) {
       this._applySingleMonitorPatch("exams", body.exams);
     }
     if (body.gradesEnabled !== undefined) {
@@ -951,9 +956,20 @@ export class PortalSessionVault {
       this._applySingleMonitorPatch("exams", { enabled: Boolean(body.examsEnabled) });
     }
     if (body.intervalSec !== undefined) {
-      const clamped = clampMonitorIntervalSec(body.intervalSec, 1800);
-      this._monitor.grades.intervalSec = clamped;
-      this._monitor.exams.intervalSec = clamped;
+      if (targetsGrades || !targetsExams) {
+        this._monitor.grades.intervalSec = clampMonitorIntervalSec(body.intervalSec, 1800);
+      }
+      if (targetsExams || !targetsGrades) {
+        this._monitor.exams.intervalSec = clampMonitorIntervalSec(body.intervalSec, 3600);
+      }
+    }
+    if (body.resetBaseline === true) {
+      if ((targetsGrades && !hasGradesObj) || (!targetsGrades && !targetsExams)) {
+        this._applySingleMonitorPatch("grades", { resetBaseline: true });
+      }
+      if ((targetsExams && !hasExamsObj) || (!targetsGrades && !targetsExams)) {
+        this._applySingleMonitorPatch("exams", { resetBaseline: true });
+      }
     }
 
     await this._persistMonitor();

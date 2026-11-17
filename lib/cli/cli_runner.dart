@@ -2098,24 +2098,25 @@ class CliRunner {
 
   Future<int> _runWorkerMonitorSet(ParsedCliInvocation inv) async {
     final auth = await _requireWorkerAuth(inv);
+    final targetsNeither =
+        inv.monitorGrades == null && inv.monitorExams == null;
+    final includeGrades = inv.monitorGrades != null ||
+        (targetsNeither && (inv.intervalSec != null || inv.resetBaseline));
+    final includeExams = inv.monitorExams != null ||
+        (targetsNeither && (inv.intervalSec != null || inv.resetBaseline));
     final payload = <String, Object?>{
-      if (inv.monitorGrades != null || inv.intervalSec != null)
+      if (includeGrades)
         'grades': <String, Object?>{
           'enabled': ?inv.monitorGrades,
           'intervalSec': ?inv.intervalSec,
           if (inv.resetBaseline) 'resetBaseline': true,
         },
-      if (inv.monitorExams != null || inv.intervalSec != null)
+      if (includeExams)
         'exams': <String, Object?>{
           'enabled': ?inv.monitorExams,
           'intervalSec': ?inv.intervalSec,
           if (inv.resetBaseline) 'resetBaseline': true,
         },
-      if (inv.resetBaseline &&
-          inv.monitorGrades == null &&
-          inv.monitorExams == null &&
-          inv.intervalSec == null)
-        'resetBaseline': true,
     };
     final status = await WorkerSessionHttpEngine.saveMonitorConfig(
       workerBaseUrl: auth.workerUrl,

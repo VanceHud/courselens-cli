@@ -1,0 +1,27 @@
+<!-- 正方定制 CAS 登录页的最小形态。
+     要点：真正的口令框是隐藏的 `#password`（可见的 `#ppassword` 只是给人看的），
+     提交还要带上 execution 令牌与 _eventId；表单地址自带一个版本号查询参数。 -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>统一身份认证平台</title>
+  </head>
+  <body id="login_new">
+    <div class="login-page">
+      <div class="login-container">
+        <div class="login-form" id="qcode">
+          <form id="fm1" method="post" action="login?v=0.123456789 ">
+            <input name="username" id="username" type="text" class="form-control" autocomplete="off" value="" />
+            <input id="ppassword" type="password" class="form-control" autocomplete="off" value="" />
+            <input name="password" id="password" type="password" style="display: none;" value="" />
+            <input name="authcode" id="authcode" type="text" class="form-control" value="" />
+            <input name="execution" type="hidden" value="test-execution-token-0123456789abcdef" />
+            <input name="_eventId" type="hidden" value="submit" />
+            <p id="errormsg" class="error text-left"></p>
+          </form>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

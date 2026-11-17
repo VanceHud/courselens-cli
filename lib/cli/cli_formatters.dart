@@ -213,7 +213,7 @@ class CliFormatters {
           {
             'command':
                 'worker webhook [status | set --url <https://...> [--provider <auto|bark|feishu|dingtalk|wecom|telegram|generic>] [--secret-stdin | --secret-env <VAR>] | test | clear]',
-            'description': '配置云端抢课成功与成绩/考试变动的多通道 Webhook 通知',
+            'description': '配置云端成绩/考试变动的多通道 Webhook 通知',
           },
           {
             'command':
@@ -238,7 +238,7 @@ class CliFormatters {
           },
           {
             'command': 'plan',
-            'description': '查询培养方案与学业修读进度树（N105515）',
+            'description': '查询培养方案与学业修读进度树（N105515，别名 progress）',
           },
           {
             'command':
@@ -266,7 +266,7 @@ class CliFormatters {
         'exitCodes': const <String, String>{
           '0': '执行成功',
           '1': '参数错误、未登录/过期、STORAGE_UNAVAILABLE 或网络/业务失败',
-          '2': 'select/drop 或云端抢课干跑预检完成（未传 --confirm，零写网络发包）',
+          '2': 'select/drop 干跑预检完成（未传 --confirm，零写网络发包）',
         },
       });
     }
@@ -1318,7 +1318,7 @@ CourseLens Native CLI (v${CliArgs.cliVersion}) — 高校教务命令行与 AI A
   }
 
   // ---------------------------------------------------------------------------
-  // 有状态 Worker 多网关管理与云端任务/抢课/推送/巡检格式化
+  // 有状态 Worker 多网关管理与云端任务/推送/巡检格式化
   // ---------------------------------------------------------------------------
 
   static String formatSavedWorkersList({

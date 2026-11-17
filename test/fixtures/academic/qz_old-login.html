@@ -1,0 +1,13 @@
+<!-- 强智（旧）登录页的最小形态：页内脚本自己把账号口令拼成 encoded，页面上另带一张验证码图。 -->
+<!doctype html>
+<html>
+  <body>
+    <script>function login(){ var encoded = encodeInp(userAccount) + '%%%' + encodeInp(userPassword); }</script>
+    <form action="/jsxsd/xk/LoginToXk">
+      <input name="userAccount" />
+      <input name="userPassword" type="password" />
+      <input name="RANDOMCODE" />
+      <img src="/jsxsd/verifycode.servlet" />
+    </form>
+  </body>
+</html>

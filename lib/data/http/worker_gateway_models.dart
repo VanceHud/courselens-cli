@@ -120,7 +120,7 @@ class SavedWorkerGateway {
   }
 }
 
-/// 云端任务执行日志条目（适用于抢课、成绩/考试巡检与主动心跳）。
+/// 云端任务执行日志条目（适用于成绩/考试巡检与主动心跳）。
 class CloudTaskLogEntry {
   const CloudTaskLogEntry({
     this.atMs,

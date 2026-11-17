@@ -1,0 +1,43 @@
+{
+  "name": "courselens-session-gateway",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted Cloudflare Worker + Durable Object stateful session gateway for CourseLens CLI",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "COURSELENS_API_KEY": {
+        "description": "网关访问密钥（必填，加密存储）。请生成高熵随机串（如执行 `openssl rand -hex 32`），切勿使用示例占位值；之后用此密钥绑定 `courselens auth worker`。"
+      },
+      "PORTAL_URL": {
+        "description": "学校教务系统根地址（必填，如 `https://jwglxt.example.edu.cn/jwglxt` 或 `https://jwxt.example.edu.cn/jsxsd`）。"
+      },
+      "PORTAL_USERNAME": {
+        "description": "你的学号 / 教务登录账号（加密存储，不会提交到 Git 仓库）。"
+      },
+      "PORTAL_PASSWORD": {
+        "description": "教务系统或统一身份认证密码（加密存储）。若贵校仅支持扫码登录、只用 `courselens worker push-cookies` 动态推送 Cookie，请填写 `COOKIE_ONLY`。"
+      },
+      "PORTAL_SYSTEM": {
+        "description": "教务系统类型：`auto`（推荐自动识别）| `ZF`（新正方）| `ZF_OLD`（旧正方）| `QZ`（新强智）| `QZ_OLD`（旧强智）。"
+      },
+      "KEEPALIVE_INTERVAL_SEC": {
+        "description": "后台定时唤醒间隔（秒）。保持默认 `0` 即为按需懒保活（平时休眠零计费，会话过期时自动重登）；仅纯种子 Cookie 保活场景才需设为如 `900`。"
+      },
+      "SESSION_VERIFY_TTL_SEC": {
+        "description": "会话存活探测结果复用窗口（秒，默认 `120`），减少对教务上游的无谓请求。"
+      },
+      "CORS_ORIGIN": {
+        "description": "允许跨域访问的浏览器来源（默认 `*`，所有控制与代理接口均强制校验 Bearer API Key）。"
+      }
+    }
+  }
+}

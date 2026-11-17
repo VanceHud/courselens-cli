@@ -215,6 +215,7 @@ class CliUpdater {
       args,
       workingDirectory: workingDirectory,
       environment: _processEnv,
+      runInShell: io.Platform.isWindows && executable.endsWith('.cmd'),
     );
     return (
       exitCode: result.exitCode,
@@ -263,24 +264,61 @@ class CliUpdater {
     return null;
   }
 
-  /// 把 [source] 产物安全替换到当前可执行文件路径：先备份 `.bak`，
-  /// 经同目录临时文件 + rename 落地，失败时原文件保持不动。
-  Future<void> _replaceCurrentExecutable(io.File source) async {
-    final exePath = io.Platform.resolvedExecutable;
-    final exeFile = io.File(exePath);
-    final backup = io.File('$exePath.bak');
-    if (backup.existsSync()) backup.deleteSync();
-    exeFile.copySync(backup.path);
+  String? _readCheckoutVersion(String root) {
+    final sep = io.Platform.pathSeparator;
+    final pubspec = io.File('$root${sep}pubspec.yaml');
+    if (!pubspec.existsSync()) return null;
+    try {
+      final match = RegExp(
+        r'^version:\s*([^\s#]+)',
+        multiLine: true,
+      ).firstMatch(pubspec.readAsStringSync());
+      return match?.group(1)?.trim();
+    } catch (_) {
+      return null;
+    }
+  }
 
-    final tempFile = io.File('$exePath.new');
+  /// 把 [source] 产物安全替换到 [targetPath]：先备份 `.bak`，
+  /// 经同目录临时文件 + rename 落地（兼容 Windows 运行中 `.exe` 改名替换），失败时原文件保持不动。
+  Future<void> _replaceExecutableFile(io.File source, String targetPath) async {
+    final targetFile = io.File(targetPath);
+    final backup = io.File('$targetPath.bak');
+    final tempFile = io.File('$targetPath.new');
+    var movedOriginalOnWindows = false;
+
     try {
       if (tempFile.existsSync()) tempFile.deleteSync();
       source.copySync(tempFile.path);
       if (!io.Platform.isWindows) {
         await io.Process.run('chmod', <String>['+x', tempFile.path]);
       }
-      tempFile.renameSync(exePath);
+      if (targetFile.existsSync()) {
+        if (backup.existsSync()) {
+          try {
+            backup.deleteSync();
+          } catch (_) {
+            // Windows 上若上次 .bak 仍被句柄占用，回退 .bak.old
+          }
+        }
+        if (io.Platform.isWindows) {
+          targetFile.renameSync(backup.path);
+          movedOriginalOnWindows = true;
+        } else {
+          targetFile.copySync(backup.path);
+        }
+      }
+      tempFile.renameSync(targetPath);
     } catch (_) {
+      if (movedOriginalOnWindows &&
+          !io.File(targetPath).existsSync() &&
+          backup.existsSync()) {
+        try {
+          backup.renameSync(targetPath);
+        } catch (_) {
+          // 忽略恢复异常
+        }
+      }
       try {
         if (tempFile.existsSync()) tempFile.deleteSync();
       } catch (_) {
@@ -289,6 +327,9 @@ class CliUpdater {
       rethrow;
     }
   }
+
+  Future<void> _replaceCurrentExecutable(io.File source) =>
+      _replaceExecutableFile(source, io.Platform.resolvedExecutable);
 
   // ---------------------------------------------------------------------------
   // 1. CLI 本体更新
@@ -309,6 +350,9 @@ class CliUpdater {
     required io.Directory checkout,
   }) async {
     final root = checkout.path;
+    final sep = io.Platform.pathSeparator;
+    final builtName = io.Platform.isWindows ? 'courselens.exe' : 'courselens';
+    final built = io.File('$root${sep}build$sep$builtName');
     try {
       final fetch = await _runProcess(
         'git',
@@ -354,8 +398,12 @@ class CliUpdater {
         workingDirectory: root,
       );
       final headShort = headResult.stdout.trim();
+      final checkoutVersion = _readCheckoutVersion(root);
+      final versionOutdated = checkoutVersion != null &&
+          compareVersions(CliArgs.cliVersion, checkoutVersion) < 0;
+      final binaryMissing = !built.existsSync();
 
-      if (behind == 0) {
+      if (behind == 0 && !versionOutdated && !binaryMissing) {
         return CliUpdateComponentResult(
           status: 'up-to-date',
           detail: '源码检出 $root 已与 $remoteRef 同步（HEAD $headShort，'
@@ -363,42 +411,53 @@ class CliUpdater {
         );
       }
       if (checkOnly) {
+        if (behind > 0) {
+          return CliUpdateComponentResult(
+            status: 'update-available',
+            detail: '源码检出 $root 落后 $remoteRef $behind 个提交'
+                '（当前 HEAD $headShort）。运行 courselens update --cli 拉取并重编译。',
+          );
+        }
         return CliUpdateComponentResult(
           status: 'update-available',
-          detail: '源码检出 $root 落后 $remoteRef $behind 个提交'
-              '（当前 HEAD $headShort）。运行 courselens update --cli 拉取并重编译。',
+          detail: '源码检出 $root 已同步（HEAD $headShort），但本地编译产物待更新'
+              '（当前运行 ${CliArgs.cliVersion}'
+              '${checkoutVersion != null ? "，检出版本 $checkoutVersion" : ""}）。'
+              '运行 courselens update --cli 重编译。',
         );
       }
 
-      final statusResult = await _runProcess(
-        'git',
-        <String>['status', '--porcelain'],
-        workingDirectory: root,
-      );
-      if (statusResult.stdout.trim().isNotEmpty) {
-        return CliUpdateComponentResult(
-          status: 'skipped',
-          detail: '源码检出 $root 工作区有未提交改动，已中止 CLI 更新；'
-              '请先提交或暂存这些改动后重试。',
+      if (behind > 0) {
+        final statusResult = await _runProcess(
+          'git',
+          <String>['status', '--porcelain'],
+          workingDirectory: root,
         );
-      }
-      final pull = await _runProcess(
-        'git',
-        <String>['pull', '--ff-only'],
-        workingDirectory: root,
-      );
-      if (pull.exitCode != 0) {
-        return CliUpdateComponentResult(
-          status: 'error',
-          detail: 'git pull --ff-only 失败：${_tail(pull.stderr)}',
+        if (statusResult.stdout.trim().isNotEmpty) {
+          return CliUpdateComponentResult(
+            status: 'skipped',
+            detail: '源码检出 $root 工作区有未提交改动，已中止 CLI 更新；'
+                '请先提交或暂存这些改动后重试。',
+          );
+        }
+        final pull = await _runProcess(
+          'git',
+          <String>['pull', '--ff-only'],
+          workingDirectory: root,
         );
+        if (pull.exitCode != 0) {
+          return CliUpdateComponentResult(
+            status: 'error',
+            detail: 'git pull --ff-only 失败：${_tail(pull.stderr)}',
+          );
+        }
       }
 
       final dart = _findDart();
       if (dart == null) {
         return const CliUpdateComponentResult(
           status: 'error',
-          detail: '已拉取最新源码，但未找到 Dart SDK（PATH 与 '
+          detail: '已同步最新源码，但未找到 Dart SDK（PATH 与 '
               '~/.local/share/dart-sdk 均无 dart），无法重编译。',
         );
       }
@@ -420,9 +479,10 @@ class CliUpdater {
           detail: 'dart pub get 失败：${_tail(pubGet.stderr)}',
         );
       }
-      final sep = io.Platform.pathSeparator;
       final buildDir = io.Directory('$root${sep}build');
       if (!buildDir.existsSync()) buildDir.createSync(recursive: true);
+      final stagedBuilt = io.File('$root${sep}build$sep$builtName.stage');
+      if (stagedBuilt.existsSync()) stagedBuilt.deleteSync();
       final compile = await _runProcess(
         dart,
         <String>[
@@ -430,7 +490,7 @@ class CliUpdater {
           'exe',
           'tools${sep}courselens_cli.dart',
           '-o',
-          'build${sep}courselens',
+          'build$sep$builtName.stage',
         ],
         workingDirectory: root,
       );
@@ -440,7 +500,17 @@ class CliUpdater {
           detail: '重编译失败：${_tail(compile.stderr)}',
         );
       }
-      final built = io.File('$root${sep}build${sep}courselens');
+      try {
+        await _replaceExecutableFile(stagedBuilt, built.path);
+      } finally {
+        if (stagedBuilt.existsSync()) {
+          try {
+            stagedBuilt.deleteSync();
+          } catch (_) {}
+        }
+      }
+
+      final pullSummary = behind > 0 ? '已拉取 $behind 个提交并重编译' : '已基于当前检出重编译';
 
       // 处理当前正在运行的可执行文件与新产物的关系。
       final exePath = io.Platform.resolvedExecutable;
@@ -453,20 +523,20 @@ class CliUpdater {
         if (resolvedTarget == built.absolute.path) {
           return CliUpdateComponentResult(
             status: 'updated',
-            detail: '已拉取 $behind 个提交并重编译；当前运行文件是软链，'
+            detail: '$pullSummary；当前运行文件是软链，'
                 '指向检出产物 ${built.path}，即为最新。',
           );
         }
         return CliUpdateComponentResult(
           status: 'updated',
-          detail: '已拉取 $behind 个提交并重编译检出产物 ${built.path}；'
+          detail: '$pullSummary检出产物 ${built.path}；'
               '当前运行文件是软链（→ $resolvedTarget），未改写软链目标。',
         );
       }
       if (io.File(exePath).absolute.path == built.absolute.path) {
         return CliUpdateComponentResult(
           status: 'updated',
-          detail: '已拉取 $behind 个提交并重编译，当前运行的正是检出产物 '
+          detail: '$pullSummary，当前运行的正是检出产物 '
               '${built.path}。',
         );
       }
@@ -481,7 +551,7 @@ class CliUpdater {
       }
       return CliUpdateComponentResult(
         status: 'updated',
-        detail: '已拉取 $behind 个提交并重编译，并把新产物安装到 $exePath'
+        detail: '$pullSummary，并把新产物安装到 $exePath'
             '（旧版本备份在 $exePath.bak）。',
       );
     } on io.ProcessException catch (error) {
@@ -646,8 +716,8 @@ class CliUpdater {
       ffi.Abi.linuxArm64 => 'courselens-linux-arm64',
       ffi.Abi.macosX64 => 'courselens-macos-x64',
       ffi.Abi.macosArm64 => 'courselens-macos-arm64',
-      ffi.Abi.windowsX64 => 'courselens-windows-x64',
-      ffi.Abi.windowsArm64 => 'courselens-windows-arm64',
+      ffi.Abi.windowsX64 => 'courselens-windows-x64.exe',
+      ffi.Abi.windowsArm64 => 'courselens-windows-arm64.exe',
       _ => null,
     };
   }
@@ -947,26 +1017,37 @@ class CliUpdater {
       final workerDir = io.Directory(
         '${checkout.path}${sep}workers${sep}session_gateway',
       );
-      final wranglerToml = io.File('${workerDir.path}${sep}wrangler.toml');
-      if (!wranglerToml.existsSync()) {
+      String? wranglerConfigName;
+      for (final candidate in const <String>[
+        'wrangler.toml',
+        'wrangler.jsonc',
+        'wrangler.json',
+      ]) {
+        if (io.File('${workerDir.path}$sep$candidate').existsSync()) {
+          wranglerConfigName = candidate;
+          break;
+        }
+      }
+      if (wranglerConfigName == null) {
         final example = io.File('${workerDir.path}${sep}wrangler.toml.example');
         final hint = example.existsSync()
-            ? '请先把 wrangler.toml.example 复制为 wrangler.toml 并按注释改成'
-                '你自己的配置，然后重新运行 courselens update --worker。'
-            : '请先在该目录放置你的 wrangler.toml，然后重新运行 '
+            ? '请先检查 wrangler.jsonc 是否完整，或把 wrangler.toml.example 复制为 '
+                'wrangler.toml 并按注释填入配置，然后重新运行 courselens update --worker。'
+            : '请先在该目录放置 wrangler.jsonc 或 wrangler.toml，然后重新运行 '
                 'courselens update --worker。';
         return CliUpdateComponentResult(
           status: 'skipped',
           detail: '网关当前为 $deployedLabel，最新版本 $latest；'
-              '但 ${workerDir.path} 下没有 wrangler.toml，已中止部署。$hint',
+              '但 ${workerDir.path} 下未找到 wrangler.jsonc / wrangler.toml，已中止部署。$hint',
         );
       }
 
+      final npxExe = io.Platform.isWindows ? 'npx.cmd' : 'npx';
       ({int exitCode, String stdout, String stderr}) deploy;
       try {
         deploy = await _runProcess(
-          'npx',
-          <String>['wrangler', 'deploy'],
+          npxExe,
+          <String>['wrangler', 'deploy', '--config', wranglerConfigName],
           workingDirectory: workerDir.path,
         );
       } on io.ProcessException catch (error) {

@@ -1,11 +1,15 @@
-# CourseLens 有状态会话网关 —— 部署配置示例
-# 用法：复制为 wrangler.toml 后按注释改成你自己的值，再执行
-#   npx wrangler deploy
-# 敏感信息不要写进这个文件，用 wrangler secret put 注入（见文件末尾）。
+# CourseLens 有状态会话网关 —— 可选本地 TOML 配置示例
+# 推荐用法（免改文件）：直接使用同目录已内置的 wrangler.jsonc（或点击 README「Deploy to Cloudflare」按钮一键部署），
+# 通过 `npx wrangler secret put <NAME>` 注入加密凭据。
+# 若偏好本地 TOML 文件：复制本文件为 wrangler.toml（已被 .gitignore 忽略），改成自己的值后执行：
+#   npx wrangler deploy --config wrangler.toml
+#   npx wrangler secret put COURSELENS_API_KEY --config wrangler.toml
+#   npx wrangler secret put PORTAL_PASSWORD --config wrangler.toml
 
 name = "courselens-session"
 main = "src/index.js"
-compatibility_date = "2025-06-01"
+compatibility_date = "2026-09-23"
+keep_vars = true
 
 # 会话保险库 Durable Object（SQLite 存储，Cookie 加密落盘）
 [durable_objects]
@@ -21,21 +25,21 @@ new_sqlite_classes = ["PortalSessionVault"]
 [vars]
 # 教务系统根地址（新正方示例）
 PORTAL_URL = "https://jwglxt.example.edu.cn/jwglxt"
-# 教务系统类型：ZF（新正方）/ ZF_OLD / QZ / QZ_OLD
-PORTAL_SYSTEM = "ZF"
+# 教务系统类型：auto（自动识别）/ ZF（新正方）/ ZF_OLD / QZ / QZ_OLD
+PORTAL_SYSTEM = "auto"
 # 教务账号（学号）。密码不要写这里，用 secret 注入 PORTAL_PASSWORD
 PORTAL_USERNAME = "your-student-id"
-# 走 CAS 统一认证的学校再填这一项
-# PORTAL_CAS_URL = "https://cas.example.edu.cn"
-# 允许访问的上游主机白名单（逗号分隔，SSRF 防护）
-ALLOWED_HOSTS = "jwglxt.example.edu.cn"
-# CORS 来源（只给自己的客户端域名，没有可留空）
-CORS_ORIGIN = ""
+# 走独立域名 CAS 统一认证的学校再填这一项
+# PORTAL_CAS_URL = "https://cas.example.edu.cn/cas/login"
+# 额外允许访问的上游主机白名单（逗号分隔；PORTAL_URL 与 PORTAL_CAS_URL 所在域名会自动放行，无多节点跳转留空即可）
+ALLOWED_HOSTS = ""
+# CORS 允许的浏览器来源（默认 "*"，所有控制与代理接口均强制校验 Bearer API Key）
+CORS_ORIGIN = "*"
 # 保活策略：0 = 懒保活（无请求时零唤醒、零上游请求），>0 = 定时保活间隔秒数
 KEEPALIVE_INTERVAL_SEC = "0"
 # 会话探活缓存秒数（窗口内不重复向上游探活）
 SESSION_VERIFY_TTL_SEC = "120"
 
 # 敏感信息用以下命令注入，不要写进配置文件、不要提交进仓库：
-#   npx wrangler secret put COURSELENS_API_KEY   # 客户端访问网关用的 API key（自拟长随机串）
-#   npx wrangler secret put PORTAL_PASSWORD      # 你的教务密码（只存在你自己的 Worker 里）
+#   npx wrangler secret put COURSELENS_API_KEY --config wrangler.toml  # 客户端访问网关用的 API Key（自拟长随机串）
+#   npx wrangler secret put PORTAL_PASSWORD    --config wrangler.toml  # 你的教务密码（只存在你自己的 Worker 里）
