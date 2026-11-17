@@ -1,0 +1,62 @@
+name: Release Native CLI Binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset_name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: courselens-linux-x64
+          - os: ubuntu-24.04-arm
+            asset_name: courselens-linux-arm64
+          - os: macos-15-intel
+            asset_name: courselens-macos-x64
+          - os: macos-latest
+            asset_name: courselens-macos-arm64
+          - os: windows-latest
+            asset_name: courselens-windows-x64.exe
+          - os: windows-11-arm
+            asset_name: courselens-windows-arm64.exe
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - name: Compile native standalone executable
+        shell: bash
+        run: |
+          mkdir -p dist
+          dart compile exe tools/courselens_cli.dart -o "dist/${{ matrix.asset_name }}"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+
+  publish:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*

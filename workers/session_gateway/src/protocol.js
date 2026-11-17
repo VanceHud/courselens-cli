@@ -147,7 +147,9 @@ export function parsePortalEnvConfig(env = {}) {
     ? normalizePortalUrl(env.PORTAL_CAS_URL, "PORTAL_CAS_URL")
     : "";
   const username = String(env.PORTAL_USERNAME || "").trim();
-  const password = String(env.PORTAL_PASSWORD || "");
+  const rawPassword = String(env.PORTAL_PASSWORD || "");
+  const password =
+    rawPassword.trim().toUpperCase() === "COOKIE_ONLY" ? "" : rawPassword;
   const seedCookies = String(env.PORTAL_COOKIES || "").trim();
   const hasPasswordAuth = Boolean(username && password);
   const hasStaticCredentials = Boolean(hasPasswordAuth || seedCookies);

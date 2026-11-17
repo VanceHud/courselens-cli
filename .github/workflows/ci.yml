@@ -1,0 +1,39 @@
+name: CI (Dart CLI & Session Gateway Worker)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  dart-cli:
+    name: Analyze, Test & Compile Native CLI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - run: dart analyze --fatal-infos
+      - run: dart test
+      - run: |
+          mkdir -p build
+          dart compile exe tools/courselens_cli.dart -o build/courselens
+          ./build/courselens --version
+          ./build/courselens --demo today
+
+  session-gateway:
+    name: Test Stateful Cloudflare Worker
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/session_gateway
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - run: npm test

@@ -26,7 +26,7 @@ class RelayHealthStatus {
   final String message;
 }
 
-/// Web 端无状态 HTTP 转发引擎（对接本地 `tools/relay_server.dart` 或 Cloudflare Worker）。
+/// 无状态 HTTP 转发引擎（对接用户自建的无状态转发网关 / `--relay`）。
 ///
 /// 浏览器受 CORS 与 `Set-Cookie` 禁读限制无法直连高校教务站；本引擎将单次请求封装为
 /// JSON 发往用户自控的无状态转发网关，由网关在服务端逐跳校验 `HostPolicy` 并原样带回多值

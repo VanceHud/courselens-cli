@@ -33,11 +33,11 @@ flowchart TB
 
 ```bash
 # 克隆仓库并进入根目录（若已在仓库内可跳过克隆）
-git clone https://github.com/VanceHud/CourseLensFlutter.git
-cd CourseLensFlutter
+git clone https://github.com/VanceHud/courselens-cli.git
+cd courselens-cli
 
 # 拉取依赖并编译原生独立可执行文件
-flutter pub get
+dart pub get
 dart compile exe tools/courselens_cli.dart -o build/courselens
 
 # （推荐）软链接至 ~/.local/bin，便于全局终端与 AI Agent 直接调用 courselens
@@ -62,7 +62,7 @@ dart run tools/courselens_cli.dart --demo today
 
 ## 3. 会话与凭据存储后端（`lib/cli/store/`）
 
-CLI 通过 `--store <auto|keychain|file|env>` 与 `--session-file <path>` 管理教务会话记录（`CliSessionRecord`：包含 `baseUrl`、`username`、`systemType`、`cookies`、`relayUrl`、`updatedAt`），严格执行**红线 #1（安全存储不可用时快速失败，绝不静默降级明文）**。
+CLI 通过 `--store <auto|keychain|file|env>` 与 `--session-file <path>` 管理教务会话记录（`CliSessionRecord`：包含 `baseUrl`、`username`、`systemType`、`cookies`、`relayUrl`、`workerUrl`、`updatedAt`），严格执行**红线 #1（安全存储不可用时快速失败，绝不静默降级明文）**。
 
 | 存储后端 | 触发条件（`--store auto` 默认优先级） | 持久化位置与安全机制 | 读写属性 |
 | --- | --- | --- | --- |
@@ -87,7 +87,7 @@ CLI 通过 `--store <auto|keychain|file|env>` 与 `--session-file <path>` 管理
 
 ---
 
-## 4. 身份认证、`/cli-auth` 网页凭据桥接与 Cookie / `.har` 导入
+## 4. 身份认证、有状态网关托管与 Cookie / `.har` 导入
 
 ### 4.1 查看当前会话（`whoami` / `auth status`）
 
@@ -99,12 +99,12 @@ courselens whoami
 courselens auth status --offline
 ```
 
-### 4.2 通过无状态 /cli-auth 网页凭据桥接导入（适配密码保险箱类 Agent）
+### 4.2 通过无状态 `/cli-auth` 网页凭据桥接导入（可选，适配密码保险箱类 Agent）
 
 #### 为什么需要 `/cli-auth`？
 
-1. **突破高校教务 `HttpOnly` Cookie 导出限制**：正方（`jwglxt`）、强智（`jsxsd`）及高校 CAS 统一认证门户普遍将核心会话 `JSESSIONID` 标记为 `HttpOnly`，即便在浏览器中正常登录教务官网，前端页面脚本（`document.cookie`）或常规网页扩展也无法直接读取并导出会话 Cookie。为此，本地无状态中继（[`tools/relay_server.dart`](../tools/relay_server.dart)）与 Cloudflare Worker（[`relay/cloudflare_worker.js`](../relay/cloudflare_worker.js)）同构内置了零持久化网页凭据桥接页 `GET /cli-auth`（及 `/cli-auth/`）：在浏览器纯内存中运行客户端登录协议（零外部依赖 `BigInt` RSA PKCS#1 v1.5 加密、裸域名 `/jwglxt` 自动探测升级、CAS 统一认证、强智 `scode` 编码及 `xtgl/index_initMenu.html` 在线核验），通过同源 `POST /v1/forward` 返回的 `hopCookies` 安全捕获多跳 `HttpOnly` Cookie。全程受严格 CSP（`connect-src 'self'; form-action 'none'`）与 `Cache-Control: no-store` 保护，**零 `localStorage` / `sessionStorage` / `indexedDB` / `document.cookie` 写入、零服务端日志与落盘**。
-2. **原生适配「密码保险箱类 AI Agent」（Password-Vault AI Agents）**：许多具备浏览器操作能力的 AI Agent（或结合系统密码钥匙串 / 1Password / Bitwarden 自动填充的智能体）将网站凭据 `(URL, username, password)` 安全托管在加密保险箱中，仅允许向标准 HTML `<input name="username">` 与 `<input name="password">` 自动填充，**绝不向大语言模型（LLM）暴露明文密码**。借助 `/cli-auth`，Agent 无需让用户粘贴密码或手动抓包，即可在零明文密码进上下文的前提下自动登录并将 Cookie 导入本地 `courselens` CLI。
+1. **突破高校教务 `HttpOnly` Cookie 导出限制**：正方（`jwglxt`）、强智（`jsxsd`）及高校 CAS 统一认证门户普遍将核心会话 `JSESSIONID` 标记为 `HttpOnly`，前端页面脚本（`document.cookie`）无法直接导出会话 Cookie。若你部署了 CourseLens Web 端的无状态转发中继，其内置了零持久化网页凭据桥接页 `GET /cli-auth`：在浏览器纯内存中运行客户端登录协议，通过同源 `POST /v1/forward` 返回的 `hopCookies` 捕获多跳 `HttpOnly` Cookie。全程受严格 CSP（`connect-src 'self'; form-action 'none'`）与 `Cache-Control: no-store` 保护，**零 `localStorage` / `sessionStorage` / `indexedDB` / `document.cookie` 写入、零服务端日志与落盘**。
+2. **原生适配「密码保险箱类 AI Agent」（Password-Vault AI Agents）**：具备浏览器操作能力且集成密码保险箱（1Password / Bitwarden / 系统钥匙串自动填充）的智能体仅允许向标准 HTML `<input name="username">` 与 `<input name="password">` 自动填充，**绝不向大语言模型（LLM）暴露明文密码**。借助 `/cli-auth`，Agent 可在零明文密码进上下文的前提下登录并将 Cookie 导入本地 `courselens` CLI。
 
 #### 路由与查询参数契约
 
@@ -112,12 +112,9 @@ courselens auth status --offline
 GET <your-relay-origin>/cli-auth?url=<portalUrl>[&system=auto|ZF|QZ][&cas=<casUrl>][&relay=1]
 ```
 
-- **本地中继地址**：`http://127.0.0.1:8787/cli-auth?url=<portalUrl>`（先执行 `dart run tools/relay_server.dart --port=8787`）
-- **自建 Cloudflare Worker 地址**：`https://course.your-domain.com/cli-auth?url=<portalUrl>`（或 `<your-relay-origin>/cli-auth?url=<portalUrl>`）
-
 | 查询参数 | 可选值 / 示例 | 作用 |
 | --- | --- | --- |
-| `url` | `https://jwglxt.example.edu.cn/jwglxt` | 预填表单外的 `#portal-url` 教务根地址（内置青科大主备节点快捷预设按钮） |
+| `url` | `https://jwglxt.example.edu.cn/jwglxt` | 预填表单外的 `#portal-url` 教务根地址 |
 | `system` | `auto`（默认）· `ZF` · `QZ` | 预选表单外的 `#portal-system` 教务系统家族 |
 | `cas` | `https://sso.example.edu.cn/cas/login` | 可选，预填可折叠的 `#cas-url` 统一身份认证入口 |
 | `relay` | `1` | 预勾选 `#include-relay`，在生成的 `#cli-import-cmd` 中自动追加 `--relay '<origin>'` |
@@ -128,17 +125,17 @@ GET <your-relay-origin>/cli-auth?url=<portalUrl>[&system=auto|ZF|QZ][&cas=<casUr
 
 | 区域 | DOM 选择器 | 元素与行为契约 |
 | --- | --- | --- |
-| 表单外站点配置（`autocomplete="off"`） | `#portal-url` · `#portal-system` · `#cas-url` · `#include-relay` | 独立于 `#login-form`（`<form id="login-form">`）之外，分别对应教务地址、系统类型（`auto`/`ZF`/`QZ`）、可选 CAS 地址与 `--relay` 附加开关，彻底杜绝自动填充错位 |
-| 标准登录表单（`#login-form` / `<form id="login-form">`） | `#login-form`<br>`#username`（`input[name="username"]`）<br>`#password`（`input[name="password"]`）<br>`#login-submit`（`button[type="submit"]`） | 供密码保险箱或人工自动填充并提交；**点击提交瞬间立即将密码读入局部变量并执行 `#password.value = ''` 清空 DOM**（`finally` 中覆写局部变量），确保后续 Agent 截图或 DOM 读取绝不残留密码 |
+| 表单外站点配置（`autocomplete="off"`） | `#portal-url` · `#portal-system` · `#cas-url` · `#include-relay` | 独立于 `#login-form` 之外，分别对应教务地址、系统类型（`auto`/`ZF`/`QZ`）、可选 CAS 地址与 `--relay` 附加开关，杜绝自动填充错位 |
+| 标准登录表单（`#login-form`） | `#login-form`<br>`#username`（`input[name="username"]`）<br>`#password`（`input[name="password"]`）<br>`#login-submit`（`button[type="submit"]`） | 供密码保险箱或人工自动填充并提交；**点击提交瞬间立即将密码读入局部变量并执行 `#password.value = ''` 清空 DOM**，确保后续截图或 DOM 读取绝不残留密码 |
 | 状态指示器 | `#auth-status` | 通过 `data-state` 属性指示状态流转：`idle` -> `working` -> `authenticated` 或 `error`；自动化脚本等待 `#auth-status[data-state="authenticated"]` |
-| 导出结果面板 | `#auth-result` · `#cli-session-meta` · `#cli-cookie-json` · `#cli-import-cmd` · `#copy-json-btn` · `#copy-cmd-btn` | 认证成功后取消 `#auth-result` 的 `hidden` 属性：`#cli-session-meta` 展示已核验 `effectiveBaseUrl`、系统类型、学号/姓名与 Cookie 键名；`#cli-cookie-json` 输出纯净 JSON Cookie 字典（如 `{"JSESSIONID":"..."}`）；`#cli-import-cmd` 输出已完成 Shell 转义的单行导入命令 |
+| 导出结果面板 | `#auth-result` · `#cli-session-meta` · `#cli-cookie-json` · `#cli-import-cmd` · `#copy-json-btn` · `#copy-cmd-btn` | 认证成功后输出纯净 JSON Cookie 字典（`#cli-cookie-json`）与已完成 Shell 转义的导入命令（`#cli-import-cmd`） |
 
 #### 密码保险箱类 Agent 标准 4 步工作流
 
-1. **打开桥接页**：导航至 `<your-relay-origin>/cli-auth?url=<portalUrl>`（或本机 `http://127.0.0.1:8787/cli-auth?url=<portalUrl>`）；
-2. **自动填充并提交**：由凭据保险箱自动填充 `#username`（`input[name="username"]`）与 `#password`（`input[name="password"]`），触发 `#login-submit`（`#password` 在提交瞬间从 DOM 清空）；
+1. **打开桥接页**：导航至 `<your-relay-origin>/cli-auth?url=<portalUrl>`；
+2. **自动填充并提交**：由凭据保险箱自动填充 `#username` 与 `#password`，触发 `#login-submit`；
 3. **等待在线核验完成**：等待选择器 `#auth-status[data-state="authenticated"]` 出现；
-4. **管道导入会话至本地安全存储**：读取 `#cli-cookie-json` 的 JSON 文本并通过标准输入导入 CLI（自动存入 macOS Keychain 或 `0600` 会话文件），或直接执行 `#cli-import-cmd`：
+4. **管道导入会话至本地安全存储**：读取 `#cli-cookie-json` 的 JSON 文本并通过标准输入导入 CLI：
    ```bash
    printf '%s' '{"JSESSIONID":"..."}' | courselens auth import-cookie \
      --url https://jwglxt.example.edu.cn/jwglxt \
@@ -184,17 +181,17 @@ security find-generic-password -s my-school -w | \
   courselens auth login --url https://jwglxt.qust.edu.cn/jwglxt --user 2024000001 --password-stdin
 ```
 
-### 4.5 通过有状态 Cloudflare Worker + API Key 绑定（`auth worker`）
+### 4.5 通过有状态 Cloudflare Worker + API Key 绑定（`auth worker`，推荐）
 
-若已部署独立有状态会话网关（[`workers/session_gateway/`](../workers/session_gateway/)，详见 [`docs/stateful-worker-api-key.md`](stateful-worker-api-key.md)），CLI 可在不触碰教务密码和原始 Cookie 的前提下直接通过 API Key 接入（与 `--password` 相同，CLI **故意拒绝 `--api-key` 命令行参数**以防 `ps` 泄露）：
+若已部署独立有状态会话网关（[`workers/session_gateway/`](../workers/session_gateway/)，支持 [README](../README.md) 中的 **Deploy to Cloudflare** 按钮一键部署，详见 [`docs/stateful-worker-api-key.md`](stateful-worker-api-key.md)），CLI 可在不触碰教务密码和原始 Cookie 的前提下直接通过 API Key 接入（与 `--password` 相同，CLI **故意拒绝 `--api-key` 命令行参数**以防 `ps` 泄露）：
 
 ```bash
 # 1. 交互式隐藏回显输入 API Key 并存入 Keychain / 0600 会话文件
-courselens auth worker --worker https://courselens-session.example.workers.dev
+courselens auth worker --url https://courselens-session.example.workers.dev --name main
 
-# 2. 通过标准输入或环境变量传入 API Key（也可附加 --refresh 强制触发云端重登）
-printf '%s' "$MY_WORKER_KEY" | courselens auth worker \
-  --worker https://courselens-session.example.workers.dev --api-key-stdin
+# 2. 通过标准输入或环境变量传入 API Key
+printf '%s\n' "$MY_WORKER_KEY" | courselens auth worker \
+  --url https://courselens-session.example.workers.dev --api-key-stdin
 
 # 3. 零落盘纯环境变量驱动（适合 AI Agent / 容器直接调用）
 COURSELENS_WORKER_URL=https://courselens-session.example.workers.dev \
@@ -252,11 +249,12 @@ courselens select --course-id <id> [--class-id <jxbId>] --confirm
 courselens drop --course-id <id> [--class-id <jxbId>] --confirm
 ```
 
-### 5.4 维护命令
+### 5.4 网关管理与维护命令
 
 | 命令签名 | 用途与核心输出 |
 | --- | --- |
-| `courselens update [--check] [--cli] [--skill] [--worker] [--all]` | 检查或更新 CLI 本体、已安装的 Agent Skill 与已部署会话网关 Worker（不带组件开关默认全部；`--check` 只报告版本状态不做修改；Worker 更新走 `wrangler deploy`，不动已注入的 Secrets） |
+| `courselens worker status\|sync\|events\|monitor\|webhooks` | 查看与管理自建有状态会话网关的缓存快照、增量事件（成绩/考试变更）、后台监控定时开关与 Webhook 推送目标（详见 [`docs/stateful-worker-api-key.md`](stateful-worker-api-key.md)） |
+| `courselens update [--check] [--cli] [--skill] [--worker] [--all]` | 检查或更新 CLI 本体、已安装的 Agent Skill 与已部署会话网关 Worker（不带组件开关默认全部；`--check` 只报告版本状态不做修改；Worker 更新自动识别 `wrangler.toml` / `wrangler.jsonc` 执行 `wrangler deploy`，不动已注入的 Encrypted Secrets） |
 
 退出码（Exit Codes）契约：
 - **`0`**：命令执行成功（含 `--confirm` 写操作成功或超时后只读核实确认成功）。
@@ -265,20 +263,17 @@ courselens drop --course-id <id> [--class-id <jxbId>] --confirm
 
 ---
 
-## 6. 无状态 HTTP 中继（`--relay`）集成
+## 6. 无状态 HTTP 中继（`--relay`）兼容接口
 
-虽然原生 CLI 默认通过本地 HTTP 客户端直连高校教务（内置手动逐跳重定向追踪、[`HostPolicy`](../lib/core/net/host_policy.dart) 校验与反代同主机 `https -> 302 http` 自动安全升级），但在跨网段调试或通过自建边缘节点路由时，也可通过 `--relay <url>`（或环境变量 `COURSELENS_RELAY_URL`）接入与 Web 端同款的**无状态转发网关**：
+原生 CLI 默认通过本地 HTTP 客户端直连高校教务（内置手动逐跳重定向追踪、[`HostPolicy`](../lib/core/net/host_policy.dart) 校验与反代同主机 `https -> 302 http` 自动安全升级），或通过 `--worker` 连接仓库内置的有状态 [`workers/session_gateway/`](../workers/session_gateway/)。若你已在边缘节点部署了兼容 `POST /v1/forward` 协议的无状态转发中继，也可通过 `--relay <url>`（或环境变量 `COURSELENS_RELAY_URL`）路由单次 HTTP 请求：
 
 ```bash
-# 连接本机启动的 Dart 无状态中继 (tools/relay_server.dart)
-courselens --relay http://127.0.0.1:8787 today
-
-# 或连接部署在自己 Cloudflare 账号下的无状态 Worker
-courselens --relay https://course.your-domain.com grades --stats
+# 通过兼容 /v1/forward 协议的自建无状态中继转发请求
+courselens --relay https://relay.your-domain.com grades --stats
 ```
 
 > [!NOTE]
-> 中继端点通过 `POST /v1/forward` 转发单次请求并回传多跳 `hopCookies`，同时在 `GET /cli-auth` 提供零存储网页凭据桥接页；中继侧**零持久化、零日志记录**，且同样强制执行 `allowedHosts` 白名单与私网/环回 SSRF 拦截。部署方式详见 [`docs/web-relay-and-deployment.md`](web-relay-and-deployment.md)。
+> 无状态中继客户端（[`RelayHttpEngine`](../lib/data/http/relay_http_engine.dart)）通过 `POST /v1/forward` 转发单次请求并回传多跳 `hopCookies`，中继侧零持久化，且同样强制执行 `allowedHosts` 白名单与私网/环回 SSRF 拦截。日常跨设备与 AI Agent 长期托管场景推荐优先使用本仓库内置的有状态会话网关（[`docs/stateful-worker-api-key.md`](stateful-worker-api-key.md)）。
 
 ---
 
@@ -286,13 +281,13 @@ courselens --relay https://course.your-domain.com grades --stats
 
 结合 [`docs/security.md`](security.md)，CLI 与 AI Agent 协作时共同遵守以下硬性边界：
 
-1. **拒绝明文降级与进程参数泄密（红线 #1）**：macOS Keychain 异常直抛 `STORAGE_UNAVAILABLE`；POSIX 会话文件强制 `0600` 并拦截任何 `mode & 0x3f != 0` 的宽松权限文件；`auth login` 严禁 `--password` argv 参数；AI Agent **绝不在聊天窗口索要用户明文教务密码**。
+1. **拒绝明文降级与进程参数泄密（红线 #1）**：macOS Keychain 异常直抛 `STORAGE_UNAVAILABLE`；POSIX 会话文件强制 `0600` 并拦截任何 `mode & 0x3f != 0` 的宽松权限文件；`auth login` / `auth worker` 严禁 `--password` / `--api-key` argv 参数；AI Agent **绝不在聊天窗口索要用户明文教务密码**。
 2. **选退课两步确认门禁（红线 #2）**：未传 `--confirm` 时零写网络发包并以退出码 `2` 返回预检结果；AI Agent 必须先运行无 `--confirm` 预检、向用户展示课程与冲突详情并取得明确同意后，才可带 `--confirm` 执行。
 3. **`RESULT_UNKNOWN` 禁盲目重发（红线 #3）**：`--confirm` 请求若遇超时或连接中断，CLI 自动转为只读查询已选课程名单核实最终状态，绝不自动重发 POST；Agent 遇到未知状态同样只做 `courselens courses` 只读核验。
 4. **逐跳 `HostPolicy` 白名单（红线 #4）**：禁用 HTTP 客户端自动重定向，每一跳 3xx 均经 `HostPolicy.isAllowed` 校验，阻断跨站钓鱼跳转。
 5. **退出即封口会话（红线 #5）**：`auth logout` 调用 `session.retire()` 封死旧 `CookieJar`。
-6. **纯 Dart 内核与零 Flutter 污染（红线 #6）**：`lib/core/` 保持零平台库依赖，`lib/cli/` 保持零 `package:flutter/` 依赖，确保原生单文件编译产物轻量可靠。
-7. **中继 SSRF 防护（红线 #7）**：配合 `--relay` 时阻断环回、RFC1918 私网、链路本地与 IPv6 ULA 地址。
+6. **纯 Dart 内核与零 UI 框架依赖（红线 #6）**：`lib/core/` 与 `lib/cli/` 保持纯 Dart 实现，确保原生单文件编译产物轻量可靠。
+7. **中继与网关 SSRF 防护（红线 #7）**：配合 `--relay` 或自建有状态 Worker 网关时阻断环回、RFC1918 私网、链路本地与 IPv6 ULA 地址。
 
 ---
 
@@ -308,8 +303,8 @@ courselens --relay https://course.your-domain.com grades --stats
 请帮我自动安装并配置 CourseLens 高校教务 CLI 与 AI Agent Skill，严格按以下步骤执行：
 
 1. 获取源码并编译原生二进制：
-   - 若当前不在 CourseLensFlutter 仓库根目录，请克隆 `https://github.com/VanceHud/CourseLensFlutter.git`（例如克隆到 `~/CourseLensFlutter`）并进入该目录；若已在仓库内则直接复用并拉取最新代码。
-   - 执行 `flutter pub get && dart compile exe tools/courselens_cli.dart -o build/courselens` 编译零外部依赖的原生单文件可执行程序。
+   - 若当前不在 courselens-cli 仓库根目录，请克隆 `https://github.com/VanceHud/courselens-cli.git`（例如克隆到 `~/courselens-cli`）并进入该目录；若已在仓库内则直接复用并拉取最新代码。
+   - 执行 `dart pub get && dart compile exe tools/courselens_cli.dart -o build/courselens` 编译零外部依赖的原生单文件可执行程序。
 2. 安装命令行并验证离线模式：
    - 执行 `mkdir -p ~/.local/bin && ln -sf "$(pwd)/build/courselens" ~/.local/bin/courselens` 创建软链接，并检查 `~/.local/bin` 是否在 `PATH` 中。
    - 运行 `~/.local/bin/courselens --demo today` 验证离线演示模式正常输出。
@@ -317,15 +312,15 @@ courselens --relay https://course.your-domain.com grades --stats
    - 自动检测我本机已有的全局 Agent 配置目录（如 `~/.gemini/config/skills/`、`~/.claude/skills/`、`~/.codex/skills/`，或在当前工作区使用 `.agents/skills/`），创建对应的 `courselens-cli` 子目录，并将 `"$(pwd)/.agents/skills/courselens-cli/SKILL.md"` 通过 `ln -sf` 软链接过去。
 4. 安全引导连接真实高校教务（严禁索要明文密码）：
    - 运行 `~/.local/bin/courselens auth status --offline` 检查是否已有登录会话。
-   - **绝对不要**让我在聊天窗口输入或粘贴教务密码，也不要在命令行传 `--password`。请只询问我的学校教务系统网址（及学号），并提供三种安全接入方式供我选择：
-     (A) 密码保险箱自动填充 / `/cli-auth` 无状态网页凭据桥接：打开 `<your-relay-origin>/cli-auth?url=<教务网址>`（或本机临时运行 `dart run tools/relay_server.dart --port=8787` 后打开 `http://127.0.0.1:8787/cli-auth?url=<教务网址>`），自动填充 `#username` 与 `#password` 并提交 `#login-submit`，等待 `#auth-status[data-state="authenticated"]` 后将 `#cli-cookie-json` 管道传入 `~/.local/bin/courselens auth import-cookie --url <教务网址> --cookie-stdin`；
+   - **绝对不要**让我在聊天窗口输入或粘贴教务密码，也不要在命令行传 `--password` 或 `--api-key`。请询问我的接入偏好，并提供三种安全接入方式供我选择：
+     (A) 自建 Cloudflare 会话网关 + API Key（推荐）：若我已通过仓库 README 的 **Deploy to Cloudflare** 按钮一键部署了 `workers/session_gateway`，生成终端命令 `~/.local/bin/courselens auth worker --url <Worker网址>` 让我在本地终端隐藏输入 API Key；
      (B) CAS / SSO / 扫码登录学校：引导我提供抓包 `.har` 文件或浏览器 Cookie，用 `~/.local/bin/courselens auth import-cookie --url <教务网址> --har <抓包文件.har>`（或 `--cookie-stdin`）导入；
      (C) 账号密码直连学校：生成完整的终端命令 `~/.local/bin/courselens auth login --url <教务网址> --user <学号>`，让我在自己的本地终端里交互式隐藏输入密码（自动存入 macOS Keychain 或 `0600` 权限会话文件），等我完成后再帮我运行 `~/.local/bin/courselens today` 核验。
 ```
 
 ### 8.2 工作区自动发现（零配置）
 
-在 `CourseLensFlutter` 仓库目录内使用支持 `.agents/skills/` 规范的智能体（如 Antigravity）时，`.agents/skills/courselens-cli/SKILL.md` 会被自动发现并挂载，无需额外安装。
+在 `courselens-cli` 仓库目录内使用支持 `.agents/skills/` 规范的智能体（如 Antigravity）时，`.agents/skills/courselens-cli/SKILL.md` 会被自动发现并挂载，无需额外安装。
 
 ### 8.3 手动全局安装（在任意项目或日常对话中随时唤起）
 
@@ -333,8 +328,8 @@ courselens --relay https://course.your-domain.com grades --stats
 
 ```bash
 # 1. 在仓库根目录编译原生 CLI 并软链接至 ~/.local/bin
-git clone https://github.com/VanceHud/CourseLensFlutter.git && cd CourseLensFlutter
-flutter pub get
+git clone https://github.com/VanceHud/courselens-cli.git && cd courselens-cli
+dart pub get
 dart compile exe tools/courselens_cli.dart -o build/courselens
 mkdir -p ~/.local/bin
 ln -sf "$(pwd)/build/courselens" ~/.local/bin/courselens

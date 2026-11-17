@@ -4,13 +4,15 @@
 
 课表、成绩、考试、空教室——不再手工登录教务网站点来点去，而是让 Claude Code、Codex 等 AI agent 通过一个原生 CLI 直接查询你自己的教务数据。全开源、自托管：教务密码只存在你自己部署的服务里，不经过任何第三方托管。
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/VanceHud/courselens-cli/tree/main/workers/session_gateway)
+
 ## 它由三部分组成
 
 | 组件 | 说明 |
 | --- | --- |
-| **协议核心 + CLI**（`lib/`、`tools/`） | 100% 纯 Dart 实现的教务协议层与原生命令行 `courselens`，无 Flutter 依赖，编译为单个可执行文件 |
+| **协议核心 + CLI**（`lib/`、`tools/`、`bin/`） | 100% 纯 Dart 实现的教务协议层与原生命令行 `courselens`，无 Flutter 依赖，编译为单个可执行文件 |
 | **Agent Skill**（`.agents/skills/courselens-cli/`） | 给 AI agent 读的操作手册：命令图、会话管理与安全红线（写操作二次确认、密码绝不经聊天窗口等），主流 agent 工具可直接加载 |
-| **有状态会话网关**（`workers/session_gateway/`） | 部署在你自己 Cloudflare 账号上的 Worker：登录会话保存在 Durable Objects 中（Cookie 加密落盘），CLI/App 只用 API key 访问；会话失效自动重登，懒保活模式下无请求时零唤醒、零上游流量 |
+| **有状态会话网关**（`workers/session_gateway/`） | 部署在你自己 Cloudflare 账号上的 Worker（支持上方按钮一键部署）：登录会话保存在 Durable Objects 中（Cookie 加密落盘），CLI 只用 API key 访问；会话失效自动重登，懒保活模式下无请求时零唤醒、零上游流量 |
 
 ## 支持的教务系统
 
@@ -37,9 +39,9 @@
    把 build/courselens 软链到 ~/.local/bin/courselens（目录不存在就建），然后运行 courselens --version 和 courselens --demo today 验证可用。
 4. 安装配套的 Agent Skill：把仓库里的 .agents/skills/courselens-cli 整个目录软链（优先）或复制到你自己的技能目录（Claude Code 是 ~/.claude/skills，Codex 是 ~/.codex/skills 或 ~/.agents/skills；你判断不出自己是哪种就问我）。然后完整读一遍其中的 SKILL.md，并读仓库的 README.md 和 docs/cli-and-agent-skill.md，之后所有教务操作都按 Skill 的规范执行。
 5. 引导我接入教务账号：先问我学校、教务系统地址（URL）和系统类型（ZF/ZF_OLD/QZ/QZ_OLD，不确定就用 auto 探测），然后让我在三种接入方式里选：
-   a) 网关模式（推荐）：在仓库 workers/session_gateway 里把 wrangler.toml.example 复制为 wrangler.toml，用 wrangler 部署到我自己的 Cloudflare 账号；COURSELENS_API_KEY 和 PORTAL_PASSWORD 两个 Secret 由我本人执行 wrangler secret put 输入，你不要经手；部署完成后用 courselens auth worker 把 CLI 绑定到网关。
+   a) 网关模式（推荐）：我可以点仓库 README 里的「Deploy to Cloudflare」按钮在网页上直接填入加密 Secret 一键部署，也可以在本地 ~/.local/share/courselens-cli/workers/session_gateway 目录执行 npx wrangler deploy 部署到我自己的 Cloudflare 账号；COURSELENS_API_KEY、PORTAL_USERNAME、PORTAL_PASSWORD 等 Secret 一律由我本人在 Cloudflare 部署页填写或执行 wrangler secret put 输入，你不要经手；部署完成后引导我用 courselens auth worker 把 CLI 绑定到网关。
    b) Cookie 导入：我在浏览器登录教务后导出 .har 或 Cookie，你用 courselens auth import-cookie 导入。
-   c) 直连模式：你把 courselens auth login 的命令给我，我在自己的终端里交互式输入学号和密码（隐藏输入），你不要让我在聊天里发密码。
+   c) 直连模式：你把 courselens auth login --url <教务地址> --user <学号> 的命令给我，我在自己的终端里交互式输入密码（隐藏输入），你不要让我在聊天里发密码。
 6. 验证接入：运行 courselens whoami（或 auth status）确认会话 ACTIVE，再运行 courselens today，把我的真实今日课表发给我看。
 
 安全红线（必须遵守）：
@@ -70,7 +72,7 @@ dart compile exe tools/courselens_cli.dart -o build/courselens
 在本机终端交互式登录（密码隐藏输入，不经过任何聊天窗口与日志）：
 
 ```bash
-courselens auth login --url https://jwglxt.example.edu.cn/jwglxt --system ZF
+courselens auth login --url https://jwglxt.example.edu.cn/jwglxt --user <你的学号> --system ZF
 courselens today
 ```
 
@@ -78,17 +80,39 @@ courselens today
 
 ### 2b. 网关模式（推荐，适合配合 AI 助手长期使用）
 
-把会话托管到你自己的 Cloudflare Worker，之后 CLI 与 AI agent 只持有 API key，本地零 Cookie、零密码：
+把会话托管到你自己的 Cloudflare Worker（Free 计划即可），之后 CLI 与 AI agent 只持有 API key，本地零 Cookie、零密码。
+
+#### 方式一：点击按钮一键部署（免本地配置 Node.js）
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/VanceHud/courselens-cli/tree/main/workers/session_gateway)
+
+1. 点击上方按钮登录你自己的 Cloudflare 账号，按页面提示填入 4 个**加密 Secret**（均存储在 Cloudflare Encrypted Secrets，**不会**写入克隆出的 Git 仓库）：
+   - `COURSELENS_API_KEY`：自拟高强度随机串（如执行 `openssl rand -hex 32` 生成，切勿使用默认占位值）
+   - `PORTAL_URL`：学校教务系统根地址（如 `https://jwglxt.example.edu.cn/jwglxt`）
+   - `PORTAL_USERNAME`：你的学号
+   - `PORTAL_PASSWORD`：教务或统一认证密码（若学校仅支持扫码登录、只用动态推送 Cookie，填 `COOKIE_ONLY`）
+2. 若学校使用独立域名的 CAS 统一身份认证，部署后可在 Cloudflare Dashboard → 该 Worker → **Settings → Variables and Secrets** 中补充 `PORTAL_CAS_URL`。
+3. 复制部署生成的 `https://courselens-session.<你的子域>.workers.dev` 地址，在本地终端绑定：
+
+```bash
+courselens auth worker --url https://courselens-session.<你的子域>.workers.dev
+courselens whoami
+courselens today
+```
+
+#### 方式二：命令行手动部署（`wrangler`）
+
+`workers/session_gateway/wrangler.jsonc` 已内置标准配置，无需手动改写文件即可注入加密凭据并发布：
 
 ```bash
 cd workers/session_gateway
-cp wrangler.toml.example wrangler.toml   # 改成你的学校与账号
 npx wrangler secret put COURSELENS_API_KEY
+npx wrangler secret put PORTAL_URL
+npx wrangler secret put PORTAL_USERNAME
 npx wrangler secret put PORTAL_PASSWORD
 npx wrangler deploy
 
-courselens auth worker --url https://<你的 Worker 地址> --api-key-stdin
-courselens whoami
+courselens auth worker --url https://<你的 Worker 地址>
 courselens today
 ```
 
@@ -108,10 +132,11 @@ courselens today                  今日/明日课程 + 近期考试倒计时
 courselens schedule               周课表，可导出 .ics 进日历
 courselens grades                 成绩、加权均分、必修绩点
 courselens exams                  考试安排与考场座位
-courselens progress               培养方案完成进度
+courselens plan                   培养方案完成进度（别名 progress）
 courselens rooms                  空教室查询
 courselens courses                已选 / 可选课程
 courselens select / drop          选课 / 退课（强制二次确认：先干跑预检，确认后才提交）
+courselens update                 检查并更新 CLI、Agent Skill 与已绑定网关（--check 只检查）
 ```
 
 ## 设计取向

@@ -1,0 +1,23 @@
+# 本地开发用法：复制为 `.dev.vars`（已被 .gitignore 忽略）供 `npm run dev` 读取。
+# 云端部署用法：
+#   1. 点击 README 中的「Deploy to Cloudflare」按钮时，下方 4 项将自动作为 Cloudflare 加密 Secret 提示填写，绝不会写入你的 Git 仓库。
+#   2. 手动命令行部署时，请通过 `npx wrangler secret put <NAME>` 逐项注入加密 Secret。
+
+# 必填：调用本网关所需的随机高熵 API Key（可用 `openssl rand -hex 32` 生成；多个 Key 用英文逗号分隔）
+COURSELENS_API_KEY="cl_sk_replace_with_32_bytes_random_hex"
+
+# 必填：学校教务系统根地址（如 https://jwglxt.example.edu.cn/jwglxt）
+PORTAL_URL="https://jwglxt.example.edu.cn/jwglxt"
+
+# 必填：学号 / 教务账号
+PORTAL_USERNAME="2025000000"
+
+# 必填：教务或统一身份认证密码（若贵校仅支持扫码/动态推送 Cookie、不托管密码，请填 COOKIE_ONLY）
+PORTAL_PASSWORD="replace_with_portal_password"
+
+# 可选进阶项（如需启用，可在部署后前往 Cloudflare Dashboard -> Settings -> Variables and Secrets 添加，或通过 wrangler secret put 注入）：
+# PORTAL_CAS_URL="https://sso.example.edu.cn/cas/login"
+# PORTAL_COOKIES='{"JSESSIONID":"..."}'
+# ALLOWED_HOSTS="jwglxt2.example.edu.cn"
+# SCHOOL_ID="my-univ"
+# SCHOOL_NAME="示例大学"

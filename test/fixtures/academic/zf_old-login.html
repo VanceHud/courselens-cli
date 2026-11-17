@@ -1,0 +1,16 @@
+<!-- 旧正方（ASP.NET）登录页的最小形态：
+     隐藏域 __VIEWSTATE 用来保状态，RSA 公钥写在两个 input 的 value 里，
+     口令框的名字是 TextBox2，验证码图挂在 icode 上。 -->
+<!doctype html>
+<html>
+  <body>
+    <form action="default2.aspx" method="post">
+      <input type="hidden" name="__VIEWSTATE" value="fresh" />
+      <input id="txtKeyExponent" value="010001" />
+      <input id="txtKeyModulus" value="cafe" />
+      <input name="txtUserName" />
+      <input type="password" name="TextBox2" />
+      <img id="icode" src="CheckCode.aspx" />
+    </form>
+  </body>
+</html>

@@ -27,7 +27,7 @@ Operate the native `courselens` CLI built on CourseLens's 100% pure-Dart protoco
        SKILL_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "<path-to-this-SKILL.md>")"
        REPO_DIR="$(cd "$(dirname "$SKILL_REAL")/../../.." && pwd)"
        if [ ! -x "$REPO_DIR/build/courselens" ]; then
-         (cd "$REPO_DIR" && flutter pub get && dart compile exe tools/courselens_cli.dart -o build/courselens)
+         (cd "$REPO_DIR" && dart pub get && dart compile exe tools/courselens_cli.dart -o build/courselens)
        fi
        mkdir -p "$HOME/.local/bin" && ln -sf "$REPO_DIR/build/courselens" "$HOME/.local/bin/courselens"
      fi
@@ -54,8 +54,8 @@ Operate the native `courselens` CLI built on CourseLens's 100% pure-Dart protoco
    - **NEVER** ask the user to paste their portal password into chat, and **NEVER** pass `--password` or `--api-key` on CLI `argv` (both are intentionally rejected to prevent `ps` / shell history leaks).
    - When unauthenticated or expired, prefer in order:
      1. Existing macOS Keychain or `0600` `~/.config/courselens/session.json` session (or `COURSELENS_WORKER_URL` + `COURSELENS_API_KEY` environment variables if using a self-hosted stateful Worker gateway);
-     2. **Stateful Cloudflare Worker Session Gateway** (`courselens auth worker --worker <workerUrl> [--api-key-stdin | --api-key-env <VAR>]`) if the user hosts `workers/session_gateway/`;
-     3. **Stateless `/cli-auth` Web Credential Bridge** (`<your-relay-origin>/cli-auth?url=<baseUrl>` or `http://127.0.0.1:8787/cli-auth?url=<baseUrl>`) when using a **Password-Vault AI Agent** or browser autofill that fills standard HTML `<input name="username">` / `<input name="password">` without exposing plaintext passwords to the LLM;
+     2. **Stateful Cloudflare Worker Session Gateway** (`courselens auth worker --url <workerUrl> [--api-key-stdin | --api-key-env <VAR>]`) if the user hosts `workers/session_gateway/` (supports 1-click Deploy to Cloudflare button or `npx wrangler deploy`);
+     3. **Stateless `/cli-auth` Web Credential Bridge** (`<your-relay-origin>/cli-auth?url=<baseUrl>`) if the user has deployed a CourseLens stateless Web relay and uses a **Password-Vault AI Agent** / browser autofill that fills standard HTML `<input name="username">` / `<input name="password">` without exposing plaintext passwords to the LLM;
      4. `.har` packet capture or `Cookie` import (`courselens auth import-cookie --url <baseUrl> --har <capture.har>`), which works seamlessly with CAS / SSO / QR-code portals;
      5. Asking the user to run interactive `courselens auth login --url <baseUrl> --user <id>` directly in their own terminal (uses hidden TTY input with `echoMode = false`).
 2. **Mandatory two-step dry-run gate for `select` and `drop` (Redline #2)**:
@@ -126,7 +126,7 @@ courselens auth logout [--keep-workers]
 
 #### Stateless `/cli-auth` Web Credential Bridge (Password-Vault AI Agents)
 
-University portals mark `JSESSIONID` as `HttpOnly`, preventing normal browser scripts (`document.cookie`) from exporting session cookies. Both `relay/cloudflare_worker.js` (`<your-relay-origin>/cli-auth`) and `tools/relay_server.dart` (`http://127.0.0.1:8787/cli-auth`) serve a stateless Web Credential Bridge (`GET /cli-auth?url=<portalUrl>[&system=auto|ZF|QZ][&cas=<casUrl>][&relay=1]`) that authenticates in browser memory (`BigInt` RSA PKCS#1 v1.5 / CAS / Qingzhi `scode`) via same-origin `POST /v1/forward` (`hopCookies`) under strict CSP (`connect-src 'self'; form-action 'none'`, `Cache-Control: no-store`) with zero `localStorage` / `sessionStorage` / `indexedDB` / `document.cookie` or server storage.
+University portals mark `JSESSIONID` as `HttpOnly`, preventing normal browser scripts (`document.cookie`) from exporting session cookies. If the user has deployed a CourseLens stateless Web relay (`<your-relay-origin>/cli-auth`), it serves a stateless Web Credential Bridge (`GET /cli-auth?url=<portalUrl>[&system=auto|ZF|QZ][&cas=<casUrl>][&relay=1]`) that authenticates in browser memory (`BigInt` RSA PKCS#1 v1.5 / CAS / Qingzhi `scode`) via same-origin `POST /v1/forward` (`hopCookies`) under strict CSP (`connect-src 'self'; form-action 'none'`, `Cache-Control: no-store`) with zero `localStorage` / `sessionStorage` / `indexedDB` / `document.cookie` or server storage.
 
 This enables **Password-Vault AI Agents** (which store `(URL, username, password)` in an encrypted vault and auto-fill standard HTML login forms without ever exposing plaintext passwords to the LLM):
 
@@ -134,7 +134,7 @@ This enables **Password-Vault AI Agents** (which store `(URL, username, password
   - Portal configuration controls sit **outside** `#login-form` (`<form id="login-form">`) with `autocomplete="off"` so credential autofill never mis-targets them: `#portal-url` (`?url=`), `#portal-system` (`?system=auto|ZF|QZ`), optional `#cas-url` (`?cas=`), and `#include-relay` (`?relay=1`, appends `--relay '<origin>'` to `#cli-import-cmd`).
   - `#login-form` (`<form id="login-form">`) contains **only** `#username` (`input[name="username"]`), `#password` (`input[name="password"]`), and `#login-submit` (`button[type="submit"]`).
 - **4-Step Agent Workflow**:
-  1. Navigate to `<your-relay-origin>/cli-auth?url=<portalUrl>` (or start local relay `dart run tools/relay_server.dart --port=8787` and open `http://127.0.0.1:8787/cli-auth?url=<portalUrl>`).
+  1. Navigate to `<your-relay-origin>/cli-auth?url=<portalUrl>`.
   2. Auto-fill `#username` (`input[name="username"]`) and `#password` (`input[name="password"]`), then submit `#login-submit` (`#password.value` is immediately wiped to `''` from the DOM on submit before network I/O so post-submit screenshots/DOM reads never see the password).
   3. Wait for `#auth-status[data-state="authenticated"]` (`data-state` transitions `idle` -> `working` -> `authenticated` or `error`; `#auth-result` un-hides `#cli-session-meta`, `#cli-cookie-json`, `#cli-import-cmd`, `#copy-json-btn`, and `#copy-cmd-btn`).
   4. Read `#cli-cookie-json` (JSON cookie map, e.g. `{"JSESSIONID":"..."}`) and pipe it into `courselens auth import-cookie --url <portalUrl> --cookie-stdin` (or run the shell-escaped command in `#cli-import-cmd`).
@@ -235,8 +235,8 @@ courselens update --worker  # redeploy the bound session gateway Worker
 
 How each component updates:
 
-- **CLI (`--cli`)**: When running from a source checkout (a git repo containing `pubspec.yaml` with `name: courselens` + `tools/courselens_cli.dart`, located via `COURSELENS_REPO_DIR`, `<repo>/build/courselens`, cwd ancestry, or `~/.local/share/courselens-cli`), the updater fetches, refuses to pull over a dirty working tree, `git pull --ff-only`, recompiles `build/courselens`, and installs it over a copied (non-symlink) running binary with a `.bak` backup. Without a checkout it falls back to the latest GitHub Release asset `courselens-<os>-<arch>`; if no Release exists it says so and skips (not an error).
+- **CLI (`--cli`)**: When running from a source checkout (a git repo containing `pubspec.yaml` with `name: courselens` + `tools/courselens_cli.dart`, located via `COURSELENS_REPO_DIR`, `<repo>/build/courselens`, cwd ancestry, or `~/.local/share/courselens-cli`), the updater fetches, refuses to pull over a dirty working tree, `git pull --ff-only`, recompiles `build/courselens` (`.exe` on Windows), and installs it over a copied (non-symlink) running binary with a `.bak` backup. Without a checkout it falls back to the latest GitHub Release asset `courselens-<os>-<arch>[.exe]`; if no Release exists it says so and skips (not an error).
 - **Skill (`--skill`)**: Compares `SKILL.md` in `COURSELENS_SKILL_DIR`, `~/.claude/skills/courselens-cli`, `~/.codex/skills/courselens-cli`, and `~/.agents/skills/courselens-cli` against the latest (checkout copy first, else the raw file on GitHub `main`). Regular files are backed up to `SKILL.md.bak` before overwriting; symlinks are never rewritten — a symlink into a checkout becomes current as soon as the checkout is pulled.
-- **Worker (`--worker`)**: Reads the bound gateway's public `GET /health` `version` field (no API key needed; gateways deployed before versioning report as "无版本号（旧版）"). When outdated, it deploys from `<checkout>/workers/session_gateway/` with `npx wrangler deploy` (requires a real `wrangler.toml` copied from `wrangler.toml.example` and a logged-in wrangler session), then re-checks `/health` to confirm the new version. **Deploying never touches injected Secrets** (`COURSELENS_API_KEY`, `PORTAL_PASSWORD` stay on the Cloudflare side).
+- **Worker (`--worker`)**: Reads the bound gateway's public `GET /health` `version` field (no API key needed; gateways deployed before versioning report as "无版本号（旧版）"). When outdated, it deploys from `<checkout>/workers/session_gateway/` with `npx wrangler deploy` (prefers local `wrangler.toml` if present, otherwise uses the built-in `wrangler.jsonc` with `"keep_vars": true`, requiring a logged-in wrangler session), then re-checks `/health` to confirm the new version. **Deploying never touches injected Secrets** (`COURSELENS_API_KEY`, `PORTAL_PASSWORD` stay on the Cloudflare side).
 
 Exit codes for `update`: `0` when the check/update completes (including "already latest" and explained skips), `1` only on hard failures such as a compile or deploy error. Agents should run `courselens update --check` first, show the user the per-component result, and only then run the real update.

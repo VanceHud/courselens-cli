@@ -813,7 +813,8 @@ class CliArgs {
         _ensureNoExtraPositionals('exams', positionals);
         command = CliCommandKind.exams;
       case 'plan':
-        _ensureNoExtraPositionals('plan', positionals);
+      case 'progress':
+        _ensureNoExtraPositionals(positionals.first, positionals);
         command = CliCommandKind.plan;
       case 'rooms':
         _ensureNoExtraPositionals('rooms', positionals);
