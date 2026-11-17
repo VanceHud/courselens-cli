@@ -252,6 +252,12 @@ courselens select --course-id <id> [--class-id <jxbId>] --confirm
 courselens drop --course-id <id> [--class-id <jxbId>] --confirm
 ```
 
+### 5.4 维护命令
+
+| 命令签名 | 用途与核心输出 |
+| --- | --- |
+| `courselens update [--check] [--cli] [--skill] [--worker] [--all]` | 检查或更新 CLI 本体、已安装的 Agent Skill 与已部署会话网关 Worker（不带组件开关默认全部；`--check` 只报告版本状态不做修改；Worker 更新走 `wrangler deploy`，不动已注入的 Secrets） |
+
 退出码（Exit Codes）契约：
 - **`0`**：命令执行成功（含 `--confirm` 写操作成功或超时后只读核实确认成功）。
 - **`2`**：**干跑预检待确认门禁**——调用 `select` 或 `drop` 未携带 `--confirm` 时，CLI **绝不发出任何写网络包**，仅执行只读目标匹配与课表冲突检查，输出完整的预检摘要与待确认命令（`--json` 输出包含 `"confirmed": false, "previewOnly": true`），并以退出码 `2` 结束。

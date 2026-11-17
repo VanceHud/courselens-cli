@@ -19,6 +19,9 @@ import { PortalSessionVault } from "./session_vault.js";
 
 export { PortalSessionVault };
 
+// 网关版本号：与 CLI 版本保持一致（Dart 侧 CliUpdater.gatewayVersion 同步）。
+const GATEWAY_VERSION = "1.1.0";
+
 const FORBIDDEN_PLACEHOLDER_KEYS = new Set([
   "cl_sk_replace_with_32_bytes_random_hex",
   "replace_with_32_bytes_random_hex",
@@ -57,6 +60,7 @@ export default {
             ok: true,
             service: "courselens-session-gateway",
             mode: "stateful-worker",
+            version: GATEWAY_VERSION,
           }),
           corsHeaders,
         );

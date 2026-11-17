@@ -46,6 +46,7 @@ enum CliCommandKind {
   courses,
   select,
   drop,
+  update,
 }
 
 /// 全局 CLI 选项（可在任意子命令前、中、后传入）。
@@ -122,6 +123,8 @@ class ParsedCliInvocation {
     this.courseId,
     this.classId,
     this.confirm = false,
+    this.updateCheck = false,
+    this.updateTargets = const <String>{},
   });
 
   final CliCommandKind command;
@@ -188,13 +191,19 @@ class ParsedCliInvocation {
   final String? courseId;
   final String? classId;
   final bool confirm;
+
+  // update
+  final bool updateCheck;
+
+  /// 目标组件集合（元素为 `cli` / `skill` / `worker`）；空集表示全部组件。
+  final Set<String> updateTargets;
 }
 
 /// 零第三方依赖的 CLI 参数解析器与安全校验器。
 class CliArgs {
   const CliArgs._();
 
-  static const String cliVersion = '1.0.0';
+  static const String cliVersion = '1.1.0';
 
   static const Set<String> validStores = <String>{
     'auto',
@@ -311,6 +320,9 @@ class CliArgs {
     String? courseId;
     String? classId;
     var confirm = false;
+    var updateCheck = false;
+    var updateAll = false;
+    final updateTargets = <String>{};
 
     final positionals = <String>[];
     final usedSubFlags = <String>{};
@@ -378,7 +390,17 @@ class CliArgs {
         case '--relay':
           relayUrl = takeValue(i, flagName, inlineValue, argv, () => i++).trim();
         case '--worker':
-          workerUrl = takeValue(i, flagName, inlineValue, argv, () => i++).trim();
+          // `courselens update --worker` 中的 --worker 是组件选择开关（无值形式，
+          // 且后随参数为另一个 flag 或已到末尾）；其余场景仍是全局网关地址参数。
+          if (inlineValue == null &&
+              positionals.isNotEmpty &&
+              positionals.first.toLowerCase() == 'update' &&
+              (i + 1 >= argv.length || argv[i + 1].startsWith('-'))) {
+            updateTargets.add('worker');
+            usedSubFlags.add('--worker');
+          } else {
+            workerUrl = takeValue(i, flagName, inlineValue, argv, () => i++).trim();
+          }
         case '--store':
           final rawStore =
               takeValue(i, flagName, inlineValue, argv, () => i++).trim().toLowerCase();
@@ -582,6 +604,22 @@ class CliArgs {
           rejectInlineBool();
           confirm = true;
           usedSubFlags.add('--confirm');
+        case '--check':
+          rejectInlineBool();
+          updateCheck = true;
+          usedSubFlags.add('--check');
+        case '--cli':
+          rejectInlineBool();
+          updateTargets.add('cli');
+          usedSubFlags.add('--cli');
+        case '--skill':
+          rejectInlineBool();
+          updateTargets.add('skill');
+          usedSubFlags.add('--skill');
+        case '--all':
+          rejectInlineBool();
+          updateAll = true;
+          usedSubFlags.add('--all');
         default:
           throw CliUsageException('未知命令行参数：$flagName（运行 courselens --help 查看支持的选项）。');
       }
@@ -789,6 +827,9 @@ class CliArgs {
       case 'drop':
         _ensureNoExtraPositionals('drop', positionals);
         command = CliCommandKind.drop;
+      case 'update':
+        _ensureNoExtraPositionals('update', positionals);
+        command = CliCommandKind.update;
       default:
         throw CliUsageException(
           '未知命令 "${positionals.first}"（运行 courselens --help 查看全部可用命令）。',
@@ -950,6 +991,7 @@ class CliArgs {
       case CliCommandKind.plan:
       case CliCommandKind.rooms:
       case CliCommandKind.courses:
+      case CliCommandKind.update:
         break;
     }
 
@@ -1006,6 +1048,10 @@ class CliArgs {
       courseId: courseId,
       classId: classId,
       confirm: confirm,
+      updateCheck: updateCheck,
+      updateTargets: updateAll
+          ? const <String>{}
+          : Set<String>.unmodifiable(updateTargets),
     );
   }
 
@@ -1130,6 +1176,13 @@ class CliArgs {
           '--course-id',
           '--class-id',
           '--confirm',
+        },
+      CliCommandKind.update => const <String>{
+          '--check',
+          '--cli',
+          '--skill',
+          '--worker',
+          '--all',
         },
       CliCommandKind.help || CliCommandKind.version => used,
     };

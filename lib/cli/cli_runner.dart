@@ -11,6 +11,7 @@ import '../data/http/worker_session_http_engine.dart';
 import 'cli_args.dart';
 import 'cli_demo_fixtures.dart';
 import 'cli_formatters.dart';
+import 'cli_updater.dart';
 import 'store/cli_session_store.dart';
 
 /// 可注入的实时 HTTP 引擎工厂签名（便于单测拦截并断言零写网络发包与 `RESULT_UNKNOWN` 行为）。
@@ -223,7 +224,25 @@ class CliRunner {
         return _runMutation(inv, dropping: false);
       case CliCommandKind.drop:
         return _runMutation(inv, dropping: true);
+      case CliCommandKind.update:
+        return _runUpdate(inv);
     }
+  }
+
+  Future<int> _runUpdate(ParsedCliInvocation inv) async {
+    final updater = CliUpdater(
+      environment: _env,
+      httpClient: _workerHttpClient,
+    );
+    final report = await updater.run(inv);
+    if (inv.global.json) {
+      _out.writeln(CliFormatters.encodeJson(report.toJson()));
+    } else {
+      for (final line in report.textLines()) {
+        _out.writeln(line);
+      }
+    }
+    return report.hasError ? exitError : exitOk;
   }
 
   CliSessionStore _resolveStore(CliGlobalOptions global) {

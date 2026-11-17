@@ -215,3 +215,28 @@ courselens drop --course-id <id> [--class-id <jxbId>] --confirm
 - **Exit code `0`**: Command succeeded (or `--confirm` write succeeded / verified).
 - **Exit code `2`**: Dry-run preview completed (`select` or `drop` called without `--confirm`); zero write packets were sent. Present preview to the user before asking to confirm.
 - **Exit code `1` (non-zero)**: Runtime, validation, authentication, or `STORAGE_UNAVAILABLE` error (details on `stderr` or JSON error envelope).
+
+### 5. Self-Update (`update`)
+
+Keep the CLI itself, this Skill, and the deployed session gateway in sync with the open-source repo (`VanceHud/courselens-cli`):
+
+```bash
+# ALWAYS check first: reports per-component status without changing anything
+courselens update --check
+
+# Update everything applicable (default when no component flag is given)
+courselens update [--all]
+
+# Or update a single component
+courselens update --cli     # CLI binary
+courselens update --skill   # this SKILL.md in installed skill directories
+courselens update --worker  # redeploy the bound session gateway Worker
+```
+
+How each component updates:
+
+- **CLI (`--cli`)**: When running from a source checkout (a git repo containing `pubspec.yaml` with `name: courselens` + `tools/courselens_cli.dart`, located via `COURSELENS_REPO_DIR`, `<repo>/build/courselens`, cwd ancestry, or `~/.local/share/courselens-cli`), the updater fetches, refuses to pull over a dirty working tree, `git pull --ff-only`, recompiles `build/courselens`, and installs it over a copied (non-symlink) running binary with a `.bak` backup. Without a checkout it falls back to the latest GitHub Release asset `courselens-<os>-<arch>`; if no Release exists it says so and skips (not an error).
+- **Skill (`--skill`)**: Compares `SKILL.md` in `COURSELENS_SKILL_DIR`, `~/.claude/skills/courselens-cli`, `~/.codex/skills/courselens-cli`, and `~/.agents/skills/courselens-cli` against the latest (checkout copy first, else the raw file on GitHub `main`). Regular files are backed up to `SKILL.md.bak` before overwriting; symlinks are never rewritten — a symlink into a checkout becomes current as soon as the checkout is pulled.
+- **Worker (`--worker`)**: Reads the bound gateway's public `GET /health` `version` field (no API key needed; gateways deployed before versioning report as "无版本号（旧版）"). When outdated, it deploys from `<checkout>/workers/session_gateway/` with `npx wrangler deploy` (requires a real `wrangler.toml` copied from `wrangler.toml.example` and a logged-in wrangler session), then re-checks `/health` to confirm the new version. **Deploying never touches injected Secrets** (`COURSELENS_API_KEY`, `PORTAL_PASSWORD` stay on the Cloudflare side).
+
+Exit codes for `update`: `0` when the check/update completes (including "already latest" and explained skips), `1` only on hard failures such as a compile or deploy error. Agents should run `courselens update --check` first, show the user the per-component result, and only then run the real update.

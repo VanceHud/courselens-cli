@@ -258,6 +258,10 @@ class CliFormatters {
             'command': 'drop --course-id <id> [--class-id <jxbId>] [--confirm]',
             'description': '两步确认制退课（不带 --confirm 仅零写包预检并返回退出码 2）',
           },
+          {
+            'command': 'update [--check] [--cli] [--skill] [--worker] [--all]',
+            'description': '检查或更新 CLI 本体、Agent Skill 与已部署的会话网关 Worker（不带组件开关默认全部；--check 只报告不修改）',
+          },
         ],
         'exitCodes': const <String, String>{
           '0': '执行成功',
@@ -321,6 +325,11 @@ CourseLens Native CLI (v${CliArgs.cliVersion}) — 高校教务命令行与 AI A
   rooms [--campus <id>] [--day <1..7>] [--weeks <spec>] [--sections <spec>]
                                       空教室查询（N2155，支持 1-16 或 1,3,5）
   courses [--query <kw>]              已选课程名单（N255010）与可选课程查询
+
+维护命令:
+  update [--check] [--cli] [--skill] [--worker] [--all]
+                                      检查或更新 CLI 本体、已安装的 Agent Skill 与已部署会话网关 Worker
+                                      （不带组件开关默认全部；--check 只报告版本状态，不做任何修改）
 
 受控写操作命令 (红线 #2 & #3):
   select --course-id <id> [--class-id <jxbId>] [--confirm]
