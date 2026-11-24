@@ -74,6 +74,25 @@ class StudentIdentity {
         grade: grade ?? this.grade,
       );
 
+  Map<String, Object?> toJson() => <String, Object?>{
+        'name': name,
+        'studentId': studentId,
+        'department': department,
+        'major': major,
+        'className': className,
+        'grade': grade,
+      };
+
+  factory StudentIdentity.fromJson(Map<String, dynamic> json) =>
+      StudentIdentity(
+        name: json['name'] as String? ?? '',
+        studentId: json['studentId'] as String? ?? '',
+        department: json['department'] as String? ?? '',
+        major: json['major'] as String? ?? '',
+        className: json['className'] as String? ?? '',
+        grade: json['grade'] as String? ?? '',
+      );
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||

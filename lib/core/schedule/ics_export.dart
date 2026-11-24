@@ -3,6 +3,7 @@ import 'dart:convert';
 import '../model/schedule.dart';
 import '../model/term.dart';
 import '../parse/civil_date.dart';
+import 'clock_text.dart';
 
 export '../model/term.dart' show SemesterStart;
 
@@ -245,15 +246,8 @@ class IcsExport {
   static String _toIcalClock(String clock) => '${clock.replaceAll(':', '')}00';
 
   /// 严格校验 `HH:mm`。
-  static bool isClockText(String clock) {
-    final halves = clock.split(':');
-    if (halves.length != 2) return false;
-    if (halves[0].length != 2 || halves[1].length != 2) return false;
-    final hour = int.tryParse(halves[0]);
-    final minute = int.tryParse(halves[1]);
-    if (hour == null || minute == null) return false;
-    return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
-  }
+  static bool isClockText(String clock) =>
+      ClockText.parseMinutes(clock) != null;
 
   /// RFC 5545 §3.3.11 文本转义。
   static String escapeIcalText(String raw) => raw

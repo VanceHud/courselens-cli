@@ -1,15 +1,75 @@
 import '../model/academic_status.dart';
+import '../model/qust_modules.dart';
 import '../model/study.dart';
 import 'html.dart';
 import 'table_rows.dart';
 
-/// 考试安排 HTML 解析。
+/// 考试安排与空教室筛选元数据 HTML 解析。
 class StudyHtml {
   const StudyHtml._();
 
   static List<ExamEntry> exams(String html, String baseUrl) {
     _requireExamPage(html);
     return TableRows.rows(html, baseUrl).map(_examEntryOf).toList();
+  }
+
+  /// 从新正方空教室入口页（`cdjy/cdjy_cxKxcdlb.html`）动态解析本校校区与场地类别下拉选项。
+  static EmptyClassroomFilterOptions emptyClassroomFilters(String html) {
+    if (html.trim().isEmpty || Html.isLoginPage(html)) {
+      return EmptyClassroomFilterOptions();
+    }
+    final document = Html.parse(html);
+
+    bool isPlaceholderLabel(String label) {
+      final clean = label.replaceAll(RegExp(r'\s+'), '').toLowerCase();
+      return clean.isEmpty ||
+          clean.contains('请选择') ||
+          clean == '--' ||
+          clean == '---' ||
+          clean == '---请选择---';
+    }
+
+    final campuses = <CampusOption>[];
+    final seenCampusIds = <String>{};
+    final campusSelect = document.querySelector('select#xqh_id') ??
+        document.querySelector('select[name="xqh_id"]') ??
+        document.querySelector('select#xq_id') ??
+        document.querySelector('select[name="xq_id"]');
+    if (campusSelect != null) {
+      for (final opt in campusSelect.querySelectorAll('option')) {
+        final id = (opt.attributes['value'] ?? '').trim();
+        final label = Html.textOf(opt).trim();
+        if (id.isEmpty || isPlaceholderLabel(label)) continue;
+        if (seenCampusIds.add(id)) {
+          campuses.add(CampusOption(id: id, name: label));
+        }
+      }
+    }
+
+    final roomTypes = <RoomTypeOption>[];
+    final seenRoomIds = <String>{};
+    final roomSelect = document.querySelector('select#cdlb_id') ??
+        document.querySelector('select[name="cdlb_id"]') ??
+        document.querySelector('select#cdjylx') ??
+        document.querySelector('select[name="cdjylx"]');
+    if (roomSelect != null) {
+      for (final opt in roomSelect.querySelectorAll('option')) {
+        final id = (opt.attributes['value'] ?? '').trim();
+        final label = Html.textOf(opt).trim();
+        if (id.isEmpty || isPlaceholderLabel(label)) continue;
+        if (seenRoomIds.add(id)) {
+          roomTypes.add(RoomTypeOption(id: id, name: label));
+        }
+      }
+    }
+    if (roomTypes.isNotEmpty) {
+      roomTypes.insert(0, const RoomTypeOption(id: '', name: '全部类型'));
+    }
+
+    return EmptyClassroomFilterOptions(
+      campuses: campuses,
+      roomTypes: roomTypes,
+    );
   }
 
   static ExamEntry _examEntryOf(TableRow row) {

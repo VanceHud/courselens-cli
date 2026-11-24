@@ -36,7 +36,6 @@ class ZhengfangJwglxtLoginFlow {
         _effectiveRoot = _trimTrailingSlash(baseUrl),
         _clock = clock;
 
-  static const String _initMenuPath = '/xtgl/index_initMenu.html?jsdm=xs';
   static const String _userCardPath =
       '/xtgl/index_cxYhxxIndex.html?xt=jw&localeKey=zh_CN&gnmkdm=index';
 
@@ -260,7 +259,7 @@ class ZhengfangJwglxtLoginFlow {
       try {
         final menuPage = await _acceptCookies(
           await _fetch(
-            '$_effectiveRoot$_initMenuPath',
+            '$_effectiveRoot/${ZhengfangHomeParser.initMenuPath}',
             referer: submitResponse.response.finalUrl,
           ),
         );
@@ -307,7 +306,7 @@ class ZhengfangJwglxtLoginFlow {
       final cardPage = await _acceptCookies(
         await _fetch(
           '$_effectiveRoot$_userCardPath',
-          referer: '$_effectiveRoot$_initMenuPath',
+          referer: '$_effectiveRoot/${ZhengfangHomeParser.initMenuPath}',
           ajax: true,
         ),
       );
@@ -465,7 +464,7 @@ class ZhengfangJwglxtLoginFlow {
         await _submitForm(
           url: '$_effectiveRoot/$relativePath',
           form: const <(String, String)>[],
-          referer: '$_effectiveRoot$_initMenuPath',
+          referer: '$_effectiveRoot/${ZhengfangHomeParser.initMenuPath}',
           ajax: true,
         ),
       );

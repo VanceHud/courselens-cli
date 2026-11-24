@@ -132,10 +132,12 @@ GET <your-relay-origin>/cli-auth?url=<portalUrl>[&system=auto|ZF|QZ][&cas=<casUr
 
 #### 密码保险箱类 Agent 标准 4 步工作流
 
-1. **打开桥接页**：导航至 `<your-relay-origin>/cli-auth?url=<portalUrl>`；
+> 请先在中继服务端配置 `CLI_AUTH_PORTAL_URL`（以及可选的 `CLI_AUTH_CAS_URL`；Cloudflare 中继还需将对应源加入 `ALLOWED_HOSTS`）。
+
+1. **打开桥接页**：导航至 `<your-relay-origin>/cli-auth`（本地中继为 `http://127.0.0.1:8787/cli-auth`）；
 2. **自动填充并提交**：由凭据保险箱自动填充 `#username` 与 `#password`，触发 `#login-submit`；
 3. **等待在线核验完成**：等待选择器 `#auth-status[data-state="authenticated"]` 出现；
-4. **管道导入会话至本地安全存储**：读取 `#cli-cookie-json` 的 JSON 文本并通过标准输入导入 CLI：
+4. **管道导入会话至本地安全存储**：读取 `#cli-cookie-json` 的 JSON 文本并通过标准输入导入 CLI（交互终端下 `--cookie-stdin` 也会关闭回显提示粘贴）：
    ```bash
    printf '%s' '{"JSESSIONID":"..."}' | courselens auth import-cookie \
      --url https://jwglxt.example.edu.cn/jwglxt \
@@ -183,10 +185,10 @@ security find-generic-password -s my-school -w | \
 
 ### 4.5 通过有状态 Cloudflare Worker + API Key 绑定（`auth worker`，推荐）
 
-若已部署独立有状态会话网关（[`workers/session_gateway/`](../workers/session_gateway/)，支持 [README](../README.md) 中的 **Deploy to Cloudflare** 按钮一键部署，详见 [`docs/stateful-worker-api-key.md`](stateful-worker-api-key.md)），CLI 可在不触碰教务密码和原始 Cookie 的前提下直接通过 API Key 接入（与 `--password` 相同，CLI **故意拒绝 `--api-key` 命令行参数**以防 `ps` 泄露）：
+若已部署独立有状态会话网关（[`workers/session_gateway/`](../workers/session_gateway/)，支持 [README](../README.md) 中的 **Deploy to Cloudflare** 按钮一键部署，详见 [`docs/stateful-worker-api-key.md`](stateful-worker-api-key.md)），CLI 可在不触碰教务密码和原始 Cookie 的前提下直接通过 API Key 接入（与 `--password` 相同，CLI **故意拒绝 `--api-key` 命令行参数**以防 `ps` 泄露；且环境变量 `COURSELENS_API_KEY` 仅对归一化后的配对 `COURSELENS_WORKER_URL` 生效）：
 
 ```bash
-# 1. 交互式隐藏回显输入 API Key 并存入 Keychain / 0600 会话文件
+# 1. 交互式隐藏回显输入 API Key 并存入 Keychain（进程内 FFI）或 0600 会话文件
 courselens auth worker --url https://courselens-session.example.workers.dev --name main
 
 # 2. 通过标准输入或环境变量传入 API Key
@@ -217,9 +219,10 @@ courselens auth logout
 | --- | --- |
 | `--demo` | 使用内置脱敏夹具离线运行（任意工作目录可用，零网络请求） |
 | `--json` | 在 `stdout` 输出结构化 JSON（默认输出紧凑 Markdown / 表格） |
+| `--no-cache` | 跳过有状态 Worker 服务端只读代理缓存，强制回源教务刷新 |
 | `--term <term>` | 覆盖目标学年学期（例如 `2025-2026-1`） |
 | `--relay <url>` | 通过无状态 HTTP 中继转发请求（如 `http://127.0.0.1:8787` 或自建 Worker 地址） |
-| `--worker <url>` | 通过自建有状态 Cloudflare Worker 会话网关请求数据（配合已保存密钥或 `COURSELENS_API_KEY`） |
+| `--worker <name\|url>` | 通过已保存网关别名或自建有状态 Cloudflare Worker 会话网关请求数据 |
 | `--store <auto\|keychain\|file\|env>` | 指定存储后端（默认 `auto`） |
 | `--session-file <path>` | 指定自定义 `0600` JSON 会话文件路径（启用 `file` 后端） |
 | `-h`, `--help` | 查看全局或子命令帮助说明 |
@@ -253,7 +256,8 @@ courselens drop --course-id <id> [--class-id <jxbId>] --confirm
 
 | 命令签名 | 用途与核心输出 |
 | --- | --- |
-| `courselens worker status\|sync\|events\|monitor\|webhooks` | 查看与管理自建有状态会话网关的缓存快照、增量事件（成绩/考试变更）、后台监控定时开关与 Webhook 推送目标（详见 [`docs/stateful-worker-api-key.md`](stateful-worker-api-key.md)） |
+| `courselens worker tasks\|push-cookies\|webhook\|monitor` | 管理自建有状态会话网关的云端任务开关、动态扫码 Cookie 注入、Webhook 推送与成绩/考试变动巡检（详见 [`docs/stateful-worker-api-key.md`](stateful-worker-api-key.md)） |
+| `courselens worker cache [status \| clear [--category <cat>]]` | 查看云端双层代理缓存命中统计与分类 TTL，或清空全量/指定分类（`catalog`/`schedule`/`grades`/`exams`/`progress`/`enrolled`/`classrooms`/`static`）缓存 |
 | `courselens update [--check] [--cli] [--skill] [--worker] [--all]` | 检查或更新 CLI 本体、已安装的 Agent Skill 与已部署会话网关 Worker（不带组件开关默认全部；`--check` 只报告版本状态不做修改；Worker 更新自动识别 `wrangler.toml` / `wrangler.jsonc` 执行 `wrangler deploy`，不动已注入的 Encrypted Secrets） |
 
 退出码（Exit Codes）契约：

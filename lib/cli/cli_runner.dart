@@ -40,7 +40,7 @@ class CliRunner {
     CliHttpEngineBuilder? httpEngineBuilder,
     http.Client? workerHttpClient,
     CliSessionStore? sessionStoreOverride,
-    CliProcessRunner? keychainProcessRunner,
+    CliKeychain? keychain,
     CliProcessRunner? chmodProcessRunner,
     void Function(AccountSession session)? onSessionRetired,
   })  : _out = out ?? io.stdout,
@@ -54,7 +54,7 @@ class CliRunner {
         _httpEngineBuilder = httpEngineBuilder,
         _workerHttpClient = workerHttpClient,
         _sessionStoreOverride = sessionStoreOverride,
-        _keychainProcessRunner = keychainProcessRunner,
+        _keychain = keychain,
         _chmodProcessRunner = chmodProcessRunner,
         _onSessionRetired = onSessionRetired;
 
@@ -76,7 +76,7 @@ class CliRunner {
   final CliHttpEngineBuilder? _httpEngineBuilder;
   final http.Client? _workerHttpClient;
   final CliSessionStore? _sessionStoreOverride;
-  final CliProcessRunner? _keychainProcessRunner;
+  final CliKeychain? _keychain;
   final CliProcessRunner? _chmodProcessRunner;
   final void Function(AccountSession session)? _onSessionRetired;
 
@@ -100,7 +100,9 @@ class CliRunner {
 
     final jsonMode = invocation.global.json;
     try {
-      return await _dispatch(invocation);
+      return invocation.global.noCache
+          ? await HttpCacheScope.runBypassingCache(() => _dispatch(invocation))
+          : await _dispatch(invocation);
     } on CliUsageException catch (error) {
       return _emitFailure(
         code: error.isSecurityViolation ? 'SECURITY_REFUSED' : 'INVALID_ARGS',
@@ -206,6 +208,10 @@ class CliRunner {
         return _runWorkerMonitorSet(inv);
       case CliCommandKind.workerMonitorCheck:
         return _runWorkerMonitorCheck(inv);
+      case CliCommandKind.workerCacheStatus:
+        return _runWorkerCacheStatus(inv);
+      case CliCommandKind.workerCacheClear:
+        return _runWorkerCacheClear(inv);
       case CliCommandKind.today:
         return _runToday(inv);
       case CliCommandKind.schedule:
@@ -254,7 +260,7 @@ class CliRunner {
       sessionFilePath: global.sessionFile,
       environment: _env,
       operatingSystem: _operatingSystem,
-      processRunner: _keychainProcessRunner,
+      keychain: _keychain,
       chmodRunner: _chmodProcessRunner,
       now: _nowProvider,
     );
@@ -383,29 +389,29 @@ class CliRunner {
     return out;
   }
 
-  static String _inferSystemId({
-    required String explicitOrSaved,
+  static AcademicSystem _inferSystem({
+    required AcademicSystem declared,
     required String baseUrl,
     StudySystemProbe? probe,
   }) {
-    final normalized = explicitOrSaved.trim().toUpperCase();
-    if (normalized.isNotEmpty && normalized != 'AUTO') {
-      final known = AcademicSystem.fromId(normalized);
-      if (known != null && known != AcademicSystem.AUTO) {
-        return known.id;
-      }
-    }
-    if (probe != null && probe.systemId.trim().isNotEmpty) {
-      final detected = AcademicSystem.fromId(probe.systemId.trim());
-      if (detected != null && detected != AcademicSystem.AUTO) {
-        return detected.id;
-      }
+    if (declared != AcademicSystem.AUTO) return declared;
+    if (probe != null) {
+      final detected = AcademicSystem.fromIdOrAuto(probe.systemId);
+      if (detected != AcademicSystem.AUTO) return detected;
     }
     final lowerUrl = baseUrl.toLowerCase();
-    if (lowerUrl.contains('/jsxsd')) return AcademicSystem.QZ.id;
-    if (lowerUrl.contains('default2.aspx')) return AcademicSystem.ZF_OLD.id;
-    return AcademicSystem.ZF.id;
+    if (lowerUrl.contains('/jsxsd')) return AcademicSystem.QZ;
+    if (lowerUrl.contains('default2.aspx')) return AcademicSystem.ZF_OLD;
+    return AcademicSystem.ZF;
   }
+
+  /// 网关 `systemId` 字段使用大写枚举名；AUTO 省略以交由网关探测。
+  static String? _gatewaySystemId(AcademicSystem system) =>
+      system == AcademicSystem.AUTO ? null : system.name;
+
+  /// CLI 会话存储中的 `systemType`：统一写入小写 [AcademicSystem.id]，AUTO 不落盘。
+  static String? _storedSystemType(AcademicSystem system) =>
+      system == AcademicSystem.AUTO ? null : system.id;
 
   _LiveClientBundle _createWorkerLiveClient({
     required String workerUrl,
@@ -460,19 +466,35 @@ class CliRunner {
     );
   }
 
+  String? _environmentKeyFor(String workerUrl) {
+    final key = _env[CliCredentialStore.envApiKey]?.trim();
+    final boundUrl = _env[CliCredentialStore.envWorkerUrl]?.trim();
+    if (key == null || key.isEmpty || boundUrl == null || boundUrl.isEmpty) {
+      return null;
+    }
+    try {
+      if (WorkerSessionHttpEngine.normalizeWorkerBaseUrl(boundUrl) ==
+          WorkerSessionHttpEngine.normalizeWorkerBaseUrl(workerUrl)) {
+        return key;
+      }
+    } on AcademicException {
+      return null;
+    }
+    return null;
+  }
+
   ({String workerUrl, String apiKey})? _resolveActiveWorkerAuth(
     ParsedCliInvocation inv,
     CliSessionRecord? record,
   ) {
     final explicitWorker = inv.global.workerUrl?.trim();
-    final envKey = _env[CliCredentialStore.envApiKey]?.trim();
 
     if (explicitWorker != null && explicitWorker.isNotEmpty) {
       final matchedProfile = record?.findSavedWorker(explicitWorker);
       if (matchedProfile != null) {
-        final key = (envKey != null && envKey.isNotEmpty)
-            ? envKey
-            : matchedProfile.apiKey;
+        final key =
+            _environmentKeyFor(matchedProfile.workerUrl) ??
+            matchedProfile.apiKey;
         return (
           workerUrl: WorkerSessionHttpEngine.normalizeWorkerBaseUrl(
             matchedProfile.workerUrl,
@@ -488,8 +510,9 @@ class CliRunner {
         );
       }
 
-      final normalizedExplicit =
-          WorkerSessionHttpEngine.normalizeWorkerBaseUrl(explicitWorker);
+      final normalizedExplicit = WorkerSessionHttpEngine.normalizeWorkerBaseUrl(
+        explicitWorker,
+      );
       String? fallbackSavedKey;
       if (record?.workerUrl != null && record!.workerUrl!.trim().isNotEmpty) {
         final normalizedRecordUrl =
@@ -498,12 +521,11 @@ class CliRunner {
           fallbackSavedKey = record.apiKey?.trim();
         }
       }
-      final rawKey =
-          (envKey != null && envKey.isNotEmpty) ? envKey : fallbackSavedKey;
+      final rawKey = _environmentKeyFor(normalizedExplicit) ?? fallbackSavedKey;
       if (rawKey == null || rawKey.isEmpty) {
         throw const AcademicException(
           AcademicStatus.INVALID_CREDENTIALS,
-          '已指定 --worker 但未提供 API Key。请设置环境变量 COURSELENS_API_KEY，或先运行 `courselens auth worker --url <workerUrl>` 保存密钥。',
+          '已指定 --worker 但未提供 API Key。请为同一网关设置 COURSELENS_WORKER_URL 和 COURSELENS_API_KEY，或先运行 `courselens auth worker --url <workerUrl>` 保存密钥。',
         );
       }
       return (workerUrl: normalizedExplicit, apiKey: rawKey);
@@ -516,11 +538,13 @@ class CliRunner {
         : envWorkerUrl;
     if (rawWorker == null || rawWorker.isEmpty) return null;
 
-    final savedKey = (record?.apiKey != null && record!.apiKey!.trim().isNotEmpty)
+    final savedKey =
+        (record?.apiKey != null && record!.apiKey!.trim().isNotEmpty)
         ? record.apiKey!.trim()
         : record?.findSavedWorker(rawWorker)?.apiKey.trim();
-    final rawKey =
-        (savedKey != null && savedKey.isNotEmpty) ? savedKey : envKey;
+    final rawKey = (savedKey != null && savedKey.isNotEmpty)
+        ? savedKey
+        : _environmentKeyFor(rawWorker);
     if (rawKey == null || rawKey.isEmpty) return null;
 
     return (
@@ -617,11 +641,10 @@ class CliRunner {
           : (record?.username?.trim() ?? '');
       final accountKey =
           effectiveUsername.isNotEmpty ? effectiveUsername : _defaultAccountKey;
-      final systemId = _inferSystemId(
-        explicitOrSaved: (record?.systemType != null &&
-                record!.systemType!.trim().isNotEmpty)
-            ? record.systemType!
-            : remote.systemId,
+      final savedSystem = AcademicSystem.fromIdOrAuto(record?.systemType);
+      final system = _inferSystem(
+        declared:
+            savedSystem != AcademicSystem.AUTO ? savedSystem : remote.system,
         baseUrl: effectiveBaseUrl,
       );
       await bundle.client.bindRemoteManagedSession(
@@ -634,7 +657,7 @@ class CliRunner {
           CliSessionRecord(
             baseUrl: effectiveBaseUrl,
             username: effectiveUsername,
-            systemType: systemId,
+            systemType: _storedSystemType(system),
             workerUrl: workerAuth.workerUrl,
             apiKey: workerAuth.apiKey,
             updatedAt: _nowProvider().toUtc(),
@@ -646,7 +669,7 @@ class CliRunner {
         client: bundle.client,
         accountKey: accountKey,
         baseUrl: effectiveBaseUrl,
-        systemId: systemId,
+        system: system,
         username: effectiveUsername,
         identity: remote.identity
             .merge(StudentIdentity(studentId: effectiveUsername)),
@@ -671,9 +694,9 @@ class CliRunner {
         : _defaultAccountKey;
 
     var effectiveBaseUrl = record.baseUrl;
-    final savedSys = record.systemType;
-    var systemId = _inferSystemId(
-      explicitOrSaved: savedSys ?? 'AUTO',
+    final savedSystem = AcademicSystem.fromIdOrAuto(record.systemType);
+    var system = _inferSystem(
+      declared: savedSystem,
       baseUrl: effectiveBaseUrl,
     );
     var identity = StudentIdentity(studentId: recUsername ?? '');
@@ -689,7 +712,7 @@ class CliRunner {
           protocol: 'cookie',
           baseUrl: effectiveBaseUrl,
           username: recUsername ?? '',
-          systemId: systemId,
+          systemId: system.id,
         ),
         storedCookies,
       );
@@ -700,9 +723,7 @@ class CliRunner {
         recPassword.isNotEmpty) {
       // env 无状态凭据模式：仅在内存中完成单次认证，绝不落盘密码
       StudySystemProbe? probe;
-      if (savedSys == null ||
-          savedSys.trim().isEmpty ||
-          savedSys.toLowerCase() == 'auto') {
+      if (savedSystem == AcademicSystem.AUTO) {
         try {
           probe = await bundle.client.probeStudySystem(
             schoolId: _cliSchoolId,
@@ -714,8 +735,8 @@ class CliRunner {
         if (probe != null && probe.baseUrl.trim().isNotEmpty) {
           effectiveBaseUrl = probe.baseUrl.trim();
         }
-        systemId = _inferSystemId(
-          explicitOrSaved: savedSys ?? 'AUTO',
+        system = _inferSystem(
+          declared: savedSystem,
           baseUrl: effectiveBaseUrl,
           probe: probe,
         );
@@ -753,7 +774,7 @@ class CliRunner {
       client: bundle.client,
       accountKey: accountKey,
       baseUrl: effectiveBaseUrl,
-      systemId: systemId,
+      system: system,
       username: recUsername ?? '',
       identity: identity,
     );
@@ -833,7 +854,9 @@ class CliRunner {
         );
         alive = remote.alive ?? remote.authenticated;
         if (remote.baseUrl.isNotEmpty) effectiveBaseUrl = remote.baseUrl;
-        if (remote.systemId.isNotEmpty) effectiveSys = remote.systemId;
+        if (remote.system != AcademicSystem.AUTO) {
+          effectiveSys = remote.system.id;
+        }
         if (remote.username.isNotEmpty) effectiveUser = remote.username;
         identity = remote.identity.merge(identity);
         statusMessage = alive
@@ -890,10 +913,10 @@ class CliRunner {
       return exitError;
     }
 
-    final systemType = _inferSystemId(
-      explicitOrSaved: record.systemType ?? 'AUTO',
+    final systemType = _inferSystem(
+      declared: AcademicSystem.fromIdOrAuto(record.systemType),
       baseUrl: record.baseUrl,
-    );
+    ).id;
     var identity = StudentIdentity(studentId: record.username ?? '');
 
     if (inv.offline) {
@@ -1039,9 +1062,10 @@ class CliRunner {
       relayUrl: inv.global.relayUrl,
     );
 
+    final requestedSystem = AcademicSystem.fromIdOrAuto(inv.system);
     var effectiveBaseUrl = rawUrl;
     StudySystemProbe? probe;
-    if (inv.system.toLowerCase() == 'auto') {
+    if (requestedSystem == AcademicSystem.AUTO) {
       try {
         probe = await bundle.client.probeStudySystem(
           schoolId: _cliSchoolId,
@@ -1055,8 +1079,8 @@ class CliRunner {
       }
     }
 
-    final systemId = _inferSystemId(
-      explicitOrSaved: inv.system,
+    final system = _inferSystem(
+      declared: requestedSystem,
       baseUrl: effectiveBaseUrl,
       probe: probe,
     );
@@ -1100,7 +1124,7 @@ class CliRunner {
       accountKey: username,
       baseUrl: finalBaseUrl,
       username: username,
-      systemId: systemId,
+      systemId: system.id,
     );
     if (cookies.isEmpty) {
       return _emitFailure(
@@ -1114,7 +1138,7 @@ class CliRunner {
     final record = CliSessionRecord(
       baseUrl: finalBaseUrl,
       username: username,
-      systemType: systemId,
+      systemType: system.id,
       cookies: cookies,
       relayUrl: inv.global.relayUrl,
       savedWorkers: _effectiveSavedWorkers(existingBeforeLogin),
@@ -1131,7 +1155,7 @@ class CliRunner {
         title: '教务登录成功',
         storeBackend: store.backendDescription,
         baseUrl: finalBaseUrl,
-        systemType: systemId,
+        systemType: system.id,
         username: username,
         identity: identity,
         cookieCount: cookies.length,
@@ -1224,6 +1248,77 @@ class CliRunner {
       ];
     }
     return const <CliSavedWorkerProfile>[];
+  }
+
+  /// Probes the worker gateway and maps its live session onto profile fields,
+  /// keeping [fallback] values the gateway leaves empty. Emits the failure and
+  /// returns null when the remote session is not alive.
+  Future<_WorkerSessionInfo?> _verifyWorkerSession({
+    required String workerUrl,
+    required String apiKey,
+    required _WorkerSessionInfo fallback,
+    required String failureMessage,
+    required bool json,
+  }) async {
+    final remote = await WorkerSessionHttpEngine.fetchRemoteSession(
+      workerBaseUrl: workerUrl,
+      apiKey: apiKey,
+      offline: false,
+      client: _workerHttpClient,
+    );
+    if (!remote.ok || remote.alive == false) {
+      _emitFailure(
+        code: AcademicStatus.SESSION_EXPIRED.name,
+        message: failureMessage,
+        json: json,
+      );
+      return null;
+    }
+    return _WorkerSessionInfo(
+      baseUrl: remote.baseUrl.isNotEmpty ? remote.baseUrl : fallback.baseUrl,
+      system:
+          remote.system != AcademicSystem.AUTO ? remote.system : fallback.system,
+      username: remote.username.isNotEmpty
+          ? remote.username
+          : (remote.identity.studentId.isNotEmpty
+              ? remote.identity.studentId
+              : fallback.username),
+      identity: remote.identity,
+    );
+  }
+
+  /// Upserts the worker profile and saves it as the active session record.
+  Future<CliSavedWorkerProfile> _saveActiveWorker({
+    required CliSessionStore store,
+    required CliSessionRecord seedRecord,
+    required String name,
+    required String workerUrl,
+    required String apiKey,
+    required _WorkerSessionInfo session,
+  }) async {
+    final systemType = _storedSystemType(session.system);
+    final profile = CliSavedWorkerProfile(
+      name: name,
+      workerUrl: workerUrl,
+      apiKey: apiKey,
+      baseUrl: session.baseUrl,
+      username: session.username,
+      systemType: systemType,
+      updatedAt: _nowProvider().toUtc(),
+    );
+    await store.save(
+      CliSessionRecord(
+        baseUrl: session.baseUrl,
+        username: session.username,
+        systemType: systemType,
+        workerUrl: workerUrl,
+        apiKey: apiKey,
+        savedWorkers: seedRecord.upsertSavedWorker(profile),
+        updatedAt: _nowProvider().toUtc(),
+        backendName: store.backendDescription,
+      ),
+    );
+    return profile;
   }
 
   Future<int> _runAuthWorker(ParsedCliInvocation inv) async {
@@ -1325,66 +1420,42 @@ class CliRunner {
         );
       }
 
-      var verifiedBaseUrl = matched.baseUrl;
-      var systemId = matched.systemType ?? 'AUTO';
-      var username = matched.username;
-      var identity = StudentIdentity(studentId: username ?? '');
+      final fallback = _WorkerSessionInfo(
+        baseUrl: matched.baseUrl,
+        system: AcademicSystem.fromIdOrAuto(matched.systemType),
+        username: matched.username,
+        identity: StudentIdentity(studentId: matched.username ?? ''),
+      );
+      final session = inv.noVerify
+          ? fallback
+          : await _verifyWorkerSession(
+              workerUrl: matched.workerUrl,
+              apiKey: matched.apiKey,
+              fallback: fallback,
+              failureMessage:
+                  '目标 Worker (${matched.name}) 在线核验未通过，可追加 --no-verify 仅切换激活配置。',
+              json: inv.global.json,
+            );
+      if (session == null) return exitError;
 
-      if (!inv.noVerify) {
-        final remote = await WorkerSessionHttpEngine.fetchRemoteSession(
-          workerBaseUrl: matched.workerUrl,
-          apiKey: matched.apiKey,
-          offline: false,
-          client: _workerHttpClient,
-        );
-        if (!remote.ok || remote.alive == false) {
-          return _emitFailure(
-            code: AcademicStatus.SESSION_EXPIRED.name,
-            message: '目标 Worker (${matched.name}) 在线核验未通过，可追加 --no-verify 仅切换激活配置。',
-            json: inv.global.json,
-          );
-        }
-        verifiedBaseUrl = remote.baseUrl;
-        systemId = remote.systemId.isNotEmpty ? remote.systemId : 'ZF';
-        username = remote.username.isNotEmpty
-            ? remote.username
-            : (remote.identity.studentId.isNotEmpty
-                ? remote.identity.studentId
-                : username);
-        identity = remote.identity;
-      }
-
-      final updatedEntry = CliSavedWorkerProfile(
+      await _saveActiveWorker(
+        store: store,
+        seedRecord: seedRecord!,
         name: matched.name,
         workerUrl: matched.workerUrl,
         apiKey: matched.apiKey,
-        baseUrl: verifiedBaseUrl,
-        username: username,
-        systemType: systemId == 'AUTO' ? null : systemId,
-        updatedAt: _nowProvider().toUtc(),
+        session: session,
       );
-      final nextSaved = seedRecord!.upsertSavedWorker(updatedEntry);
-      final nextRecord = CliSessionRecord(
-        baseUrl: verifiedBaseUrl,
-        username: username,
-        systemType: systemId == 'AUTO' ? null : systemId,
-        workerUrl: matched.workerUrl,
-        apiKey: matched.apiKey,
-        savedWorkers: nextSaved,
-        updatedAt: _nowProvider().toUtc(),
-        backendName: store.backendDescription,
-      );
-      await store.save(nextRecord);
 
       _out.writeln(
         CliFormatters.formatAuthSaved(
           json: inv.global.json,
           title: '已切换激活 Worker 网关 (${matched.name})',
           storeBackend: store.backendDescription,
-          baseUrl: verifiedBaseUrl,
-          systemType: systemId,
-          username: username,
-          identity: identity,
+          baseUrl: session.baseUrl,
+          systemType: session.system.id,
+          username: session.username,
+          identity: session.identity,
           cookieCount: 0,
           verified: !inv.noVerify,
           workerUrl: matched.workerUrl,
@@ -1404,78 +1475,54 @@ class CliRunner {
         .copyWith(savedWorkers: currentProfiles);
     final existingMatched = seedRecord.findSavedWorker(workerUrl);
 
-    final hasExplicitKeySource = inv.apiKeyStdin ||
+    final hasExplicitKeySource =
+        inv.apiKeyStdin ||
         inv.apiKeyEnv != null ||
-        ((_env[CliCredentialStore.envApiKey] ?? '').trim().isNotEmpty);
+        _environmentKeyFor(workerUrl) != null;
     final apiKey = (!hasExplicitKeySource && existingMatched != null)
         ? existingMatched.apiKey
-        : await _resolveApiKey(inv);
+        : await _resolveApiKey(inv, workerUrl);
 
-    var verifiedBaseUrl = existingMatched?.baseUrl ?? '';
-    var systemId = existingMatched?.systemType ?? 'AUTO';
-    String? username = existingMatched?.username;
-    var identity = const StudentIdentity();
-
-    if (!inv.noVerify) {
-      final remote = await WorkerSessionHttpEngine.fetchRemoteSession(
-        workerBaseUrl: workerUrl,
-        apiKey: apiKey,
-        offline: false,
-        client: _workerHttpClient,
-      );
-      if (!remote.ok || remote.alive == false) {
-        return _emitFailure(
-          code: AcademicStatus.SESSION_EXPIRED.name,
-          message: '有状态 Worker 在线核验未通过，请检查 Worker Secrets 中的教务账密与地址配置（或使用 --no-verify 仅预先保存网关）。',
-          json: inv.global.json,
-        );
-      }
-      verifiedBaseUrl = remote.baseUrl;
-      systemId = remote.systemId.isNotEmpty ? remote.systemId : 'ZF';
-      username = remote.username.isNotEmpty
-          ? remote.username
-          : (remote.identity.studentId.isNotEmpty
-              ? remote.identity.studentId
-              : null);
-      identity = remote.identity;
-    }
+    final fallback = _WorkerSessionInfo(
+      baseUrl: existingMatched?.baseUrl ?? '',
+      system: AcademicSystem.fromIdOrAuto(existingMatched?.systemType),
+      username: existingMatched?.username,
+      identity: const StudentIdentity(),
+    );
+    final session = inv.noVerify
+        ? fallback
+        : await _verifyWorkerSession(
+            workerUrl: workerUrl,
+            apiKey: apiKey,
+            fallback: fallback,
+            failureMessage:
+                '有状态 Worker 在线核验未通过，请检查 Worker Secrets 中的教务账密与地址配置（或使用 --no-verify 仅预先保存网关）。',
+            json: inv.global.json,
+          );
+    if (session == null) return exitError;
 
     final profileName = (inv.name != null && inv.name!.trim().isNotEmpty)
         ? inv.name!.trim()
         : (existingMatched?.name ??
             CliSavedWorkerProfile.deriveDefaultName(workerUrl));
-    final profile = CliSavedWorkerProfile(
+    final profile = await _saveActiveWorker(
+      store: store,
+      seedRecord: seedRecord,
       name: profileName,
       workerUrl: workerUrl,
       apiKey: apiKey,
-      baseUrl: verifiedBaseUrl,
-      username: username,
-      systemType: systemId == 'AUTO' ? null : systemId,
-      updatedAt: _nowProvider().toUtc(),
+      session: session,
     );
-    final nextSaved = seedRecord.upsertSavedWorker(profile);
-
-    final record = CliSessionRecord(
-      baseUrl: verifiedBaseUrl,
-      username: username,
-      systemType: systemId == 'AUTO' ? null : systemId,
-      workerUrl: workerUrl,
-      apiKey: apiKey,
-      savedWorkers: nextSaved,
-      updatedAt: _nowProvider().toUtc(),
-      backendName: store.backendDescription,
-    );
-    await store.save(record);
 
     _out.writeln(
       CliFormatters.formatAuthSaved(
         json: inv.global.json,
         title: '有状态 Worker API Key 绑定成功 ($profileName)',
         storeBackend: store.backendDescription,
-        baseUrl: verifiedBaseUrl,
-        systemType: systemId,
-        username: username,
-        identity: identity,
+        baseUrl: session.baseUrl,
+        systemType: session.system.id,
+        username: session.username,
+        identity: session.identity,
         cookieCount: 0,
         verified: !inv.noVerify,
         workerUrl: workerUrl,
@@ -1487,7 +1534,10 @@ class CliRunner {
     return exitOk;
   }
 
-  Future<String> _resolveApiKey(ParsedCliInvocation inv) async {
+  Future<String> _resolveApiKey(
+    ParsedCliInvocation inv,
+    String workerUrl,
+  ) async {
     final stdinLine = _readStdinLine;
     final stdinAll = _readStdinAll;
     final hiddenPrompt = _readHiddenPassword;
@@ -1510,14 +1560,18 @@ class CliRunner {
 
     final apiKeyEnvName = inv.apiKeyEnv;
     if (apiKeyEnvName != null) {
-      final val = _env[apiKeyEnvName]?.trim();
+      final val = apiKeyEnvName == CliCredentialStore.envApiKey
+          ? _environmentKeyFor(workerUrl)
+          : _env[apiKeyEnvName]?.trim();
       if (val == null || val.isEmpty) {
-        throw CliUsageException('环境变量 $apiKeyEnvName 未设置或为空，无法读取 Worker API Key。');
+        throw CliUsageException(
+          '环境变量 $apiKeyEnvName 未设置或为空，无法读取 Worker API Key。',
+        );
       }
       return val;
     }
 
-    final fallbackEnvKey = _env[CliCredentialStore.envApiKey]?.trim();
+    final fallbackEnvKey = _environmentKeyFor(workerUrl);
     if (fallbackEnvKey != null && fallbackEnvKey.isNotEmpty) {
       return fallbackEnvKey;
     }
@@ -1540,6 +1594,38 @@ class CliRunner {
   // 3. auth import-cookie
   // ---------------------------------------------------------------------------
 
+  Future<String> _readCookieFromStdin() async {
+    final prompt = _readHiddenPassword;
+    final readAll = _readStdinAll;
+    final readLine = _readStdinLine;
+    final String result;
+    if (prompt != null) {
+      result = await prompt('请粘贴 Cookie JSON 或 Cookie 请求头（输入不回显） ') ?? '';
+    } else if (readAll != null) {
+      result = await readAll();
+    } else if (readLine != null) {
+      result = await readLine() ?? '';
+    } else if (io.stdin.hasTerminal) {
+      _err.write('请粘贴 Cookie JSON 或 Cookie 请求头（输入不回显） ');
+      final echo = io.stdin.echoMode;
+      try {
+        io.stdin.echoMode = false;
+        result = io.stdin.readLineSync() ?? '';
+      } finally {
+        io.stdin.echoMode = echo;
+        _err.writeln();
+      }
+    } else {
+      result = await io.stdin
+          .transform(const io.SystemEncoding().decoder)
+          .join();
+    }
+    if (result.trim().isEmpty) {
+      throw const CliUsageException('--cookie-stdin 未从标准输入读取到任何 Cookie 内容。');
+    }
+    return result;
+  }
+
   Future<int> _runAuthImportCookie(ParsedCliInvocation inv) async {
     final store = _resolveStore(inv.global);
     final rawUrl = inv.url!;
@@ -1548,22 +1634,10 @@ class CliRunner {
     String? cookieInput = inv.cookie;
     String? harInput;
 
-    final stdinAll = _readStdinAll;
-    final stdinLine = _readStdinLine;
     final harFilePath = inv.harPath;
 
     if (inv.cookieStdin) {
-      if (stdinAll != null) {
-        cookieInput = await stdinAll();
-      } else if (stdinLine != null) {
-        cookieInput = await stdinLine() ?? '';
-      } else {
-        cookieInput =
-            await io.stdin.transform(const io.SystemEncoding().decoder).join();
-      }
-      if (cookieInput.trim().isEmpty) {
-        throw const CliUsageException('--cookie-stdin 未从标准输入读取到任何 Cookie 内容。');
-      }
+      cookieInput = await _readCookieFromStdin();
     } else if (harFilePath != null) {
       final file = io.File(harFilePath);
       if (!await file.exists()) {
@@ -1583,9 +1657,10 @@ class CliRunner {
       );
     }
 
+    final requestedSystem = AcademicSystem.fromIdOrAuto(inv.system);
     var finalBaseUrl = rawUrl;
-    var systemId = _inferSystemId(
-      explicitOrSaved: inv.system,
+    var system = _inferSystem(
+      declared: requestedSystem,
       baseUrl: rawUrl,
     );
     var identity = StudentIdentity(studentId: inv.user ?? '');
@@ -1598,7 +1673,7 @@ class CliRunner {
         relayUrl: inv.global.relayUrl,
       );
       StudySystemProbe? probe;
-      if (inv.system.toLowerCase() == 'auto') {
+      if (requestedSystem == AcademicSystem.AUTO) {
         try {
           probe = await bundle.client.probeStudySystem(
             schoolId: _cliSchoolId,
@@ -1610,8 +1685,8 @@ class CliRunner {
         if (probe != null && probe.baseUrl.trim().isNotEmpty) {
           finalBaseUrl = probe.baseUrl.trim();
         }
-        systemId = _inferSystemId(
-          explicitOrSaved: inv.system,
+        system = _inferSystem(
+          declared: requestedSystem,
           baseUrl: finalBaseUrl,
           probe: probe,
         );
@@ -1650,7 +1725,7 @@ class CliRunner {
         accountKey: accountKey,
         baseUrl: finalBaseUrl,
         username: username ?? '',
-        systemId: systemId,
+        systemId: system.id,
         seedCookies: extracted,
       );
     }
@@ -1659,7 +1734,7 @@ class CliRunner {
     final record = CliSessionRecord(
       baseUrl: finalBaseUrl,
       username: username,
-      systemType: systemId,
+      systemType: system.id,
       cookies: mergedCookies,
       relayUrl: inv.global.relayUrl,
       savedWorkers: _effectiveSavedWorkers(existingBeforeImport),
@@ -1674,7 +1749,7 @@ class CliRunner {
         title: 'Cookie 会话导入成功',
         storeBackend: store.backendDescription,
         baseUrl: finalBaseUrl,
-        systemType: systemId,
+        systemType: system.id,
         username: username,
         identity: identity,
         cookieCount: mergedCookies.length,
@@ -1903,17 +1978,7 @@ class CliRunner {
     String? harInput;
 
     if (inv.cookieStdin) {
-      if (_readStdinAll != null) {
-        cookieInput = await _readStdinAll();
-      } else if (_readStdinLine != null) {
-        cookieInput = await _readStdinLine() ?? '';
-      } else {
-        cookieInput =
-            await io.stdin.transform(const io.SystemEncoding().decoder).join();
-      }
-      if (cookieInput.trim().isEmpty) {
-        throw const CliUsageException('--cookie-stdin 未从标准输入读取到任何 Cookie 内容。');
-      }
+      cookieInput = await _readCookieFromStdin();
     } else if (inv.harPath != null) {
       final file = io.File(inv.harPath!);
       if (!await file.exists()) {
@@ -1954,7 +2019,7 @@ class CliRunner {
       apiKey: auth.apiKey,
       cookies: extracted,
       portalUrl: effectivePortalUrl,
-      systemId: inv.system.toLowerCase() == 'auto' ? null : inv.system,
+      systemId: _gatewaySystemId(AcademicSystem.fromIdOrAuto(inv.system)),
       username: inv.user,
       keepaliveIntervalSec: inv.intervalSec,
       client: _workerHttpClient,
@@ -1966,7 +2031,7 @@ class CliRunner {
         title: '云端 Worker Cookie 动态注入成功',
         storeBackend: auth.store.backendDescription,
         baseUrl: remote.baseUrl.isNotEmpty ? remote.baseUrl : effectivePortalUrl,
-        systemType: remote.systemId.isNotEmpty ? remote.systemId : 'ZF',
+        systemType: remote.system.id,
         username: remote.username.isNotEmpty ? remote.username : inv.user,
         identity: remote.identity,
         cookieCount: remote.injectedCookieCount ?? extracted.length,
@@ -2149,6 +2214,42 @@ class CliRunner {
         workerUrl: auth.workerUrl,
         status: status,
         heading: '云端成绩/考试即时巡检完成',
+      ),
+    );
+    return exitOk;
+  }
+
+  Future<int> _runWorkerCacheStatus(ParsedCliInvocation inv) async {
+    final auth = await _requireWorkerAuth(inv);
+    final stats = await WorkerSessionHttpEngine.fetchCacheStats(
+      workerBaseUrl: auth.workerUrl,
+      apiKey: auth.apiKey,
+      client: _workerHttpClient,
+    );
+    _out.writeln(
+      CliFormatters.formatWorkerCacheStats(
+        json: inv.global.json,
+        workerUrl: auth.workerUrl,
+        stats: stats,
+      ),
+    );
+    return exitOk;
+  }
+
+  Future<int> _runWorkerCacheClear(ParsedCliInvocation inv) async {
+    final auth = await _requireWorkerAuth(inv);
+    final clearedCount = await WorkerSessionHttpEngine.clearRemoteCache(
+      workerBaseUrl: auth.workerUrl,
+      apiKey: auth.apiKey,
+      category: inv.cacheCategory,
+      client: _workerHttpClient,
+    );
+    _out.writeln(
+      CliFormatters.formatWorkerCacheCleared(
+        json: inv.global.json,
+        workerUrl: auth.workerUrl,
+        category: inv.cacheCategory ?? 'all',
+        clearedCount: clearedCount,
       ),
     );
     return exitOk;
@@ -2756,7 +2857,7 @@ class CliRunner {
     final offers = <CourseOffer>[];
     final sectionsMap = <String, List<CourseSection>>{};
 
-    if (ctx.systemId == AcademicSystem.ZF.id) {
+    if (ctx.system == AcademicSystem.ZF) {
       try {
         final scopes = await ctx.client.loadCourseScopes(
           schoolId: _cliSchoolId,
@@ -3427,7 +3528,7 @@ class CliRunner {
     _AuthenticatedLiveContext ctx,
     String termId,
   ) async {
-    if (ctx.systemId == AcademicSystem.ZF.id) {
+    if (ctx.system == AcademicSystem.ZF) {
       try {
         final remote = await ctx.client.fetchCampusBellSchedule(
           schoolId: _cliSchoolId,
@@ -3536,45 +3637,28 @@ class CliRunner {
   static String _formatIsoDate(int year, int month, int day) =>
       '${year.toString().padLeft(4, "0")}-${month.toString().padLeft(2, "0")}-${day.toString().padLeft(2, "0")}';
 
-  static final RegExp _embeddedDatePattern = RegExp(
-    r'(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})',
-  );
-
-  static String _extractExamIsoDate(ExamEntry e) {
-    if (e.examDate.trim().isNotEmpty) return e.examDate.trim();
-    final match = _embeddedDatePattern.firstMatch(e.time);
-    if (match == null) return '';
-    final y = match.group(1)!.padLeft(4, '0');
-    final m = match.group(2)!.padLeft(2, '0');
-    final d = match.group(3)!.padLeft(2, '0');
-    return '$y-$m-$d';
-  }
-
   static List<CliExamCountdownView> _buildExamCountdowns(
     List<ExamEntry> exams,
     int referenceEpochDays,
   ) {
     final out = <CliExamCountdownView>[];
     for (final e in exams) {
-      final dateStr = _extractExamIsoDate(e);
+      final date = ExamDates.of(e);
+      var dateStr = '';
       int? daysUntil;
       var text = '日期待定';
-      if (dateStr.isNotEmpty) {
-        try {
-          final (ey, em, ed) = CliArgs.parseIsoDate(dateStr);
-          final examDays = CivilDate.daysFromCivil(ey, em, ed);
-          daysUntil = examDays - referenceEpochDays;
-          if (daysUntil == 0) {
-            text = '今天';
-          } else if (daysUntil == 1) {
-            text = '明天';
-          } else if (daysUntil > 1) {
-            text = '还有 $daysUntil 天';
-          } else {
-            text = '已结束 (${-daysUntil}天前)';
-          }
-        } on CliUsageException {
-          daysUntil = null;
+      if (date != null) {
+        final (ey, em, ed) = date;
+        dateStr = _formatIsoDate(ey, em, ed);
+        daysUntil = CivilDate.daysFromCivil(ey, em, ed) - referenceEpochDays;
+        if (daysUntil == 0) {
+          text = '今天';
+        } else if (daysUntil == 1) {
+          text = '明天';
+        } else if (daysUntil > 1) {
+          text = '还有 $daysUntil 天';
+        } else {
+          text = '已结束 (${-daysUntil}天前)';
         }
       }
       final enriched = (e.examDate.isEmpty && dateStr.isNotEmpty)
@@ -3827,6 +3911,20 @@ class CliRunner {
   }
 }
 
+class _WorkerSessionInfo {
+  const _WorkerSessionInfo({
+    required this.baseUrl,
+    required this.system,
+    required this.username,
+    required this.identity,
+  });
+
+  final String baseUrl;
+  final AcademicSystem system;
+  final String? username;
+  final StudentIdentity identity;
+}
+
 class _LiveClientBundle {
   const _LiveClientBundle({
     required this.client,
@@ -3846,7 +3944,7 @@ class _AuthenticatedLiveContext {
     required this.client,
     required this.accountKey,
     required this.baseUrl,
-    required this.systemId,
+    required this.system,
     required this.username,
     required this.identity,
   });
@@ -3856,9 +3954,11 @@ class _AuthenticatedLiveContext {
   final AcademicClient client;
   final String accountKey;
   final String baseUrl;
-  final String systemId;
+  final AcademicSystem system;
   final String username;
   final StudentIdentity identity;
+
+  String get systemId => system.id;
 }
 
 /// 扩展 [EmptyClassroomQuery] 以精确支持 `--sections 1,3,5` 等非连续节次位掩码。

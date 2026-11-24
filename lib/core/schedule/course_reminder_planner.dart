@@ -1,4 +1,5 @@
 import '../parse/civil_date.dart';
+import 'clock_text.dart';
 import 'ics_export.dart';
 
 /// 一条课前绝对时刻提醒。
@@ -184,14 +185,8 @@ class CourseReminderPlanner {
       day >= 1 && day <= 7 ? _weekdayNames[day - 1] : '周$day';
 
   static (int, int)? _parseClock(String value) {
-    final parts = value.split(':');
-    if (parts.length != 2 || parts[0].length != 2 || parts[1].length != 2) {
-      return null;
-    }
-    final hour = int.tryParse(parts[0]);
-    final minute = int.tryParse(parts[1]);
-    if (hour == null || minute == null) return null;
-    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
-    return (hour, minute);
+    final minutes = ClockText.parseMinutes(value);
+    if (minutes == null) return null;
+    return (minutes ~/ 60, minutes % 60);
   }
 }

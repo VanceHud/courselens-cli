@@ -29,7 +29,6 @@ class BrowserSessionImportFlow {
 
   static const String _gbk = 'gbk';
   static const String _big5 = 'big5';
-  static const String _initMenuPath = '/xtgl/index_initMenu.html?jsdm=xs';
   static const String _userCardPath =
       '/xtgl/index_cxYhxxIndex.html?xt=jw&localeKey=zh_CN&gnmkdm=index';
 
@@ -204,7 +203,9 @@ class BrowserSessionImportFlow {
     var authenticated = false;
 
     try {
-      final menu = await _fetch('$_effectiveRoot$_initMenuPath');
+      final menu = await _fetch(
+        '$_effectiveRoot/${ZhengfangHomeParser.initMenuPath}',
+      );
       await _acceptCookies(menu);
       if (menu.response.status == 200 && !Html.isLoginPage(menu.text)) {
         final meta = ZhengfangHomeParser.parse(menu.text);

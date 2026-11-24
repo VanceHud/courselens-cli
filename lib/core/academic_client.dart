@@ -349,6 +349,28 @@ class AcademicClient {
   ) async =>
       (await _sessions.find(schoolId, accountKey))?.baseUrl;
 
+  /// 将指定账号活动会话切换至同校备用节点根地址（退役旧会话并迁移 Cookie 快照，清空旧节点首页缓存）。
+  Future<void> switchSessionBaseUrl({
+    required String schoolId,
+    required String accountKey,
+    required String newBaseUrl,
+  }) async {
+    final trimmed = newBaseUrl.trim();
+    if (trimmed.isEmpty) return;
+    final previous = await _sessions.find(schoolId, accountKey);
+    final prevCookies = previous != null
+        ? await previous.cookies.snapshot()
+        : const <StoredCookie>[];
+    final prevUsername = previous?.username ?? '';
+    final updated = await _sessions.replace(schoolId, accountKey, trimmed);
+    if (prevCookies.isNotEmpty) {
+      await updated.cookies.restore(prevCookies);
+    }
+    if (prevUsername.isNotEmpty) {
+      updated.username = prevUsername;
+    }
+  }
+
   Future<AcademicSystem?> probeSystem(String loginPageUrl) async {
     final request = HttpRequest(method: HttpMethod.get, url: loginPageUrl);
     final response = await _engine.execute(request);
@@ -567,6 +589,18 @@ class AcademicClient {
     );
   }
 
+  /// 动态获取本校空教室筛选元数据（校区与场地类别，新正方 `N2155`）。
+  Future<EmptyClassroomFilterOptions> fetchEmptyClassroomFilters({
+    required String schoolId,
+    required String accountKey,
+    String systemId = 'zf',
+    String username = '',
+  }) async {
+    final session = await _sessions.requireActive(schoolId, accountKey);
+    return _openReader(session, systemId, username, '', '')
+        .emptyClassroomFilters();
+  }
+
   /// 空教室查询（新正方 `N2155`）。
   Future<List<EmptyClassroom>> queryEmptyClassrooms(
     EmptyClassroomQuery query, {
@@ -679,6 +713,7 @@ class AcademicClient {
         session: session,
         engine: _engine,
         decoder: _decoder,
+        defaultRefererPath: StudyReader.defaultRefererPathFor(system),
       ),
       courseGnmkdm: defaultSelectionGnmkdm,
     );
@@ -690,19 +725,22 @@ class AcademicClient {
     String username,
     String schedulePath,
     String gradesPath,
-  ) =>
-      StudyReader(
-        transport: StudyTransport(
-          session: session,
-          engine: _engine,
-          decoder: _decoder,
-        ),
-        system: _systemOrFail(systemId),
-        username: username,
-        schedulePath: schedulePath,
-        gradesPath: gradesPath,
-        nowEpochSeconds: _clock,
-      );
+  ) {
+    final system = _systemOrFail(systemId);
+    return StudyReader(
+      transport: StudyTransport(
+        session: session,
+        engine: _engine,
+        decoder: _decoder,
+        defaultRefererPath: StudyReader.defaultRefererPathFor(system),
+      ),
+      system: system,
+      username: username,
+      schedulePath: schedulePath,
+      gradesPath: gradesPath,
+      nowEpochSeconds: _clock,
+    );
+  }
 
   static AcademicSystem _systemOrFail(String systemId) {
     final system = AcademicSystem.fromId(systemId);

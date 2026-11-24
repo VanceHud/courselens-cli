@@ -199,5 +199,52 @@ void main() {
       expect(schedule.single.day, equals(3));
       expect(schedule.single.period, equals(PeriodSpan(3, 4)));
     });
+
+    test('StudyHtml.emptyClassroomFilters dynamically parses campuses and room types for any ZF university', () {
+      const html = '''
+      <html><body>
+        <form id="searchForm">
+          <select id="xqh_id" name="xqh_id">
+            <option value="">--请选择--</option>
+            <option value="S1">南校区</option>
+            <option value="N2">北校区</option>
+            <option value="S1">南校区重复</option>
+          </select>
+          <select id="cdlb_id" name="cdlb_id">
+            <option value="">全部</option>
+            <option value="01">多媒体阶梯教室</option>
+            <option value="02">智慧研讨室</option>
+            <option value="01">重复类别</option>
+          </select>
+        </form>
+      </body></html>
+      ''';
+      final filters = StudyHtml.emptyClassroomFilters(html);
+      expect(filters.campuses.length, equals(2));
+      expect(filters.campuses[0], equals(const CampusOption(id: 'S1', name: '南校区')));
+      expect(filters.campuses[1], equals(const CampusOption(id: 'N2', name: '北校区')));
+      expect(filters.roomTypes.length, equals(3));
+      expect(filters.roomTypes[0], equals(const RoomTypeOption(id: '', name: '全部类型')));
+      expect(filters.roomTypes[1], equals(const RoomTypeOption(id: '01', name: '多媒体阶梯教室')));
+      expect(filters.roomTypes[2], equals(const RoomTypeOption(id: '02', name: '智慧研讨室')));
+
+      // Empty or login HTML safely yields empty lists without throwing
+      final emptyFilters = StudyHtml.emptyClassroomFilters('<html><body>login</body></html>');
+      expect(emptyFilters.isEmpty, isTrue);
+    });
+
+    test('PeriodScheduleBuilder exposes universal school-agnostic presets', () {
+      final std12 = PeriodScheduleBuilder.standard12Preset();
+      expect(std12.length, equals(12));
+      expect(std12.first.start, equals('08:00'));
+
+      final m830 = PeriodScheduleBuilder.morning830Preset();
+      expect(m830.length, equals(12));
+      expect(m830.first.start, equals('08:30'));
+
+      final std11 = PeriodScheduleBuilder.standard11Preset();
+      expect(std11.length, equals(11));
+      expect(std11.first.start, equals('08:00'));
+    });
   });
 }

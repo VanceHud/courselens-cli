@@ -85,7 +85,7 @@ class CliUpdater {
 
   /// 与 Worker 源码 `workers/session_gateway/src/index.js` 中的
   /// `GATEWAY_VERSION` 常量保持同步；有源码检出时以源码常量为准。
-  static const String gatewayVersion = '1.1.0';
+  static const String gatewayVersion = '1.1.8';
 
   final Map<String, String> _environment;
   final http.Client? _httpClient;

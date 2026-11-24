@@ -30,6 +30,29 @@ class CreditCategoryNode {
     return ratio;
   }
 
+  Map<String, Object?> toJson() => <String, Object?>{
+        'id': id,
+        'parentId': parentId,
+        'name': name,
+        'isLeaf': isLeaf,
+        if (earnedCredits != null) 'earnedCredits': earnedCredits,
+        if (requiredCredits != null) 'requiredCredits': requiredCredits,
+        if (remainingCredits != null) 'remainingCredits': remainingCredits,
+        'passed': passed,
+      };
+
+  factory CreditCategoryNode.fromJson(Map<String, dynamic> json) =>
+      CreditCategoryNode(
+        id: json['id'] as String? ?? '',
+        parentId: json['parentId'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+        isLeaf: json['isLeaf'] == true,
+        earnedCredits: (json['earnedCredits'] as num?)?.toDouble(),
+        requiredCredits: (json['requiredCredits'] as num?)?.toDouble(),
+        remainingCredits: (json['remainingCredits'] as num?)?.toDouble(),
+        passed: json['passed'] == true,
+      );
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -89,6 +112,57 @@ class AcademicProgressReport {
 
   List<CreditCategoryNode> get leafCategories =>
       categories.where((c) => c.isLeaf).toList(growable: false);
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'officialGpa': officialGpa,
+        'totalCourses': totalCourses,
+        'passedCourses': passedCourses,
+        'failedCourses': failedCourses,
+        'unstudiedCourses': unstudiedCourses,
+        'inProgressCourses': inProgressCourses,
+        'outsidePlanPassedCourses': outsidePlanPassedCourses,
+        'studentId': studentId,
+        'cjlrxn': cjlrxn,
+        'cjlrxq': cjlrxq,
+        'hiddenParams': hiddenParams,
+        'categories': categories.map((c) => c.toJson()).toList(growable: false),
+      };
+
+  factory AcademicProgressReport.fromJson(Map<String, dynamic> json) {
+    final rawHidden = json['hiddenParams'];
+    final hidden = <String, String>{};
+    if (rawHidden is Map) {
+      for (final entry in rawHidden.entries) {
+        hidden[entry.key.toString()] = entry.value?.toString() ?? '';
+      }
+    }
+    final rawCats = json['categories'];
+    final cats = <CreditCategoryNode>[];
+    if (rawCats is List) {
+      for (final item in rawCats) {
+        if (item is Map) {
+          cats.add(
+            CreditCategoryNode.fromJson(Map<String, dynamic>.from(item)),
+          );
+        }
+      }
+    }
+    return AcademicProgressReport(
+      officialGpa: json['officialGpa'] as String? ?? '',
+      totalCourses: (json['totalCourses'] as num?)?.toInt() ?? 0,
+      passedCourses: (json['passedCourses'] as num?)?.toInt() ?? 0,
+      failedCourses: (json['failedCourses'] as num?)?.toInt() ?? 0,
+      unstudiedCourses: (json['unstudiedCourses'] as num?)?.toInt() ?? 0,
+      inProgressCourses: (json['inProgressCourses'] as num?)?.toInt() ?? 0,
+      outsidePlanPassedCourses:
+          (json['outsidePlanPassedCourses'] as num?)?.toInt() ?? 0,
+      studentId: json['studentId'] as String? ?? '',
+      cjlrxn: json['cjlrxn'] as String? ?? '',
+      cjlrxq: json['cjlrxq'] as String? ?? '',
+      hiddenParams: hidden,
+      categories: cats,
+    );
+  }
 }
 
 /// 培养方案课程修读状态（对应 `XDZT`：4=已通过、1=在读、2=未通过、3=未修）。
@@ -143,6 +217,37 @@ class PlanCourseEntry {
   final String retakeScore;
   final String gpa;
 
+  Map<String, Object?> toJson() => <String, Object?>{
+        'courseCode': courseCode,
+        'courseName': courseName,
+        'credits': credits,
+        'category': category,
+        'courseType': courseType,
+        'statusCode': status.code,
+        'recommendedTerm': recommendedTerm,
+        'maxScore': maxScore,
+        'score': score,
+        'makeupScore': makeupScore,
+        'retakeScore': retakeScore,
+        'gpa': gpa,
+      };
+
+  factory PlanCourseEntry.fromJson(Map<String, dynamic> json) =>
+      PlanCourseEntry(
+        courseCode: json['courseCode'] as String? ?? '',
+        courseName: json['courseName'] as String? ?? '',
+        credits: json['credits'] as String? ?? '',
+        category: json['category'] as String? ?? '',
+        courseType: json['courseType'] as String? ?? '',
+        status: PlanCourseStatus.fromCode(json['statusCode'] as String? ?? ''),
+        recommendedTerm: json['recommendedTerm'] as String? ?? '',
+        maxScore: json['maxScore'] as String? ?? '',
+        score: json['score'] as String? ?? '',
+        makeupScore: json['makeupScore'] as String? ?? '',
+        retakeScore: json['retakeScore'] as String? ?? '',
+        gpa: json['gpa'] as String? ?? '',
+      );
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -183,6 +288,21 @@ class CampusOption {
 
   final String id;
   final String name;
+
+  Map<String, Object?> toJson() => <String, Object?>{'id': id, 'name': name};
+
+  factory CampusOption.fromJson(Map<String, dynamic> json) => CampusOption(
+        id: json['id'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+      );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CampusOption && id == other.id && name == other.name;
+
+  @override
+  int get hashCode => Object.hash(id, name);
 }
 
 /// 教室类型选项。
@@ -191,12 +311,72 @@ class RoomTypeOption {
 
   final String id;
   final String name;
+
+  Map<String, Object?> toJson() => <String, Object?>{'id': id, 'name': name};
+
+  factory RoomTypeOption.fromJson(Map<String, dynamic> json) => RoomTypeOption(
+        id: json['id'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+      );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RoomTypeOption && id == other.id && name == other.name;
+
+  @override
+  int get hashCode => Object.hash(id, name);
+}
+
+/// 从教务空教室入口页动态解析得到的校区与教室类型元数据。
+class EmptyClassroomFilterOptions {
+  EmptyClassroomFilterOptions({
+    List<CampusOption> campuses = const <CampusOption>[],
+    List<RoomTypeOption> roomTypes = const <RoomTypeOption>[],
+  })  : campuses = List.unmodifiable(campuses),
+        roomTypes = List.unmodifiable(roomTypes);
+
+  final List<CampusOption> campuses;
+  final List<RoomTypeOption> roomTypes;
+
+  bool get isEmpty => campuses.isEmpty && roomTypes.isEmpty;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'campuses': campuses.map((c) => c.toJson()).toList(growable: false),
+        'roomTypes': roomTypes.map((r) => r.toJson()).toList(growable: false),
+      };
+
+  factory EmptyClassroomFilterOptions.fromJson(Map<String, dynamic> json) {
+    final rawCampuses = json['campuses'];
+    final campuses = <CampusOption>[];
+    if (rawCampuses is List) {
+      for (final item in rawCampuses) {
+        if (item is Map) {
+          campuses.add(CampusOption.fromJson(Map<String, dynamic>.from(item)));
+        }
+      }
+    }
+    final rawTypes = json['roomTypes'];
+    final roomTypes = <RoomTypeOption>[];
+    if (rawTypes is List) {
+      for (final item in rawTypes) {
+        if (item is Map) {
+          roomTypes
+              .add(RoomTypeOption.fromJson(Map<String, dynamic>.from(item)));
+        }
+      }
+    }
+    return EmptyClassroomFilterOptions(
+      campuses: campuses,
+      roomTypes: roomTypes,
+    );
+  }
 }
 
 /// 空闲教室查询参数（自动将教学周与节次闭区间编码为正方 `zcd` / `jcd` 位掩码）。
 class EmptyClassroomQuery {
   const EmptyClassroomQuery({
-    this.campusId = '1',
+    this.campusId = '',
     this.termId,
     this.week = 1,
     this.weeks = const <int>[],
@@ -213,6 +393,22 @@ class EmptyClassroomQuery {
     this.page = 1,
   });
 
+  /// 通用高校默认校区选项（当教务未提供校区下拉或离线无预设时使用）。
+  static const List<CampusOption> genericCampuses = <CampusOption>[
+    CampusOption(id: '', name: '全部校区'),
+  ];
+
+  /// 通用新正方教室类型选项。
+  static const List<RoomTypeOption> genericRoomTypes = <RoomTypeOption>[
+    RoomTypeOption(id: '', name: '全部类型'),
+    RoomTypeOption(id: '001', name: '多媒体教室'),
+    RoomTypeOption(id: '006', name: '普通教室'),
+    RoomTypeOption(id: '002', name: '机房'),
+    RoomTypeOption(id: '003', name: '实验室'),
+    RoomTypeOption(id: '007', name: '语音室'),
+  ];
+
+  /// 青岛科技大学预设校区列表（保留供 QUST 预设与历史测试兼容）。
   static const List<CampusOption> qustCampuses = <CampusOption>[
     CampusOption(id: '1', name: '四方校区'),
     CampusOption(id: '2', name: '崂山校区'),
@@ -223,6 +419,7 @@ class EmptyClassroomQuery {
     CampusOption(id: 'F47F8EB55D6B9F4BE055000000000001', name: '淄博基地'),
   ];
 
+  /// 青岛科技大学预设教室类型列表（保留供 QUST 预设与历史测试兼容）。
   static const List<RoomTypeOption> qustRoomTypes = <RoomTypeOption>[
     RoomTypeOption(id: '', name: '全部类型'),
     RoomTypeOption(id: '001', name: '多媒体教室'),
@@ -376,6 +573,43 @@ class EnrolledCourseEntry {
   final String selectionStatus;
   final bool isRetake;
   final String termId;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'courseCode': courseCode,
+        'courseName': courseName,
+        'teachingClass': teachingClass,
+        'jxbId': jxbId,
+        'teacher': teacher,
+        'credits': credits,
+        'scheduleText': scheduleText,
+        'location': location,
+        'campus': campus,
+        'weeksText': weeksText,
+        'category': category,
+        'courseType': courseType,
+        'selectionStatus': selectionStatus,
+        'isRetake': isRetake,
+        'termId': termId,
+      };
+
+  factory EnrolledCourseEntry.fromJson(Map<String, dynamic> json) =>
+      EnrolledCourseEntry(
+        courseCode: json['courseCode'] as String? ?? '',
+        courseName: json['courseName'] as String? ?? '',
+        teachingClass: json['teachingClass'] as String? ?? '',
+        jxbId: json['jxbId'] as String? ?? '',
+        teacher: json['teacher'] as String? ?? '',
+        credits: json['credits'] as String? ?? '',
+        scheduleText: json['scheduleText'] as String? ?? '',
+        location: json['location'] as String? ?? '',
+        campus: json['campus'] as String? ?? '',
+        weeksText: json['weeksText'] as String? ?? '',
+        category: json['category'] as String? ?? '',
+        courseType: json['courseType'] as String? ?? '',
+        selectionStatus: json['selectionStatus'] as String? ?? '',
+        isRetake: json['isRetake'] == true,
+        termId: json['termId'] as String? ?? '',
+      );
 
   @override
   bool operator ==(Object other) =>

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import '../port/storage.dart';
+import '../port/stored_load.dart';
 
 /// [CredentialVault.selfCheck] 的结果。
 class VaultSelfCheck {
@@ -34,37 +35,43 @@ class CredentialVault {
     String account,
     String password,
   ) async {
-    final passwords = await _read();
+    final load = await _read();
+    final passwords = load.value;
     passwords[_entryKey(schoolId, account)] = password;
-    await _write(passwords);
+    await _write(load, passwords);
   }
 
   Future<String?> load(String schoolId, String account) async {
-    final passwords = await _read();
+    final passwords = (await _read()).value;
     return passwords[_entryKey(schoolId, account)];
   }
 
   Future<bool> has(String schoolId, String account) async {
-    final passwords = await _read();
+    final passwords = (await _read()).value;
     return passwords.containsKey(_entryKey(schoolId, account));
   }
 
   Future<int> count() async {
-    final passwords = await _read();
+    final passwords = (await _read()).value;
     return passwords.length;
   }
 
   Future<void> forget(String schoolId, String account) async {
-    final passwords = await _read();
+    final load = await _read();
+    final passwords = load.value;
     passwords.remove(_entryKey(schoolId, account));
     if (passwords.isEmpty) {
+      await backupCorruptSecureEntry(_store, _key, load);
       await _store.delete(_key);
     } else {
-      await _write(passwords);
+      await _write(load, passwords);
     }
   }
 
-  Future<void> forgetAll() => _store.delete(_key);
+  Future<void> forgetAll() async {
+    await _store.delete(_key);
+    await _store.delete(corruptBackupKey(_key));
+  }
 
   Future<VaultSelfCheck> selfCheck() async {
     const probeKey = 'selfcheck.probe';
@@ -104,27 +111,50 @@ class CredentialVault {
     }
   }
 
-  Future<Map<String, String>> _read() async {
+  Future<StoredLoad<Map<String, String>>> _read() async {
     final bytes = await _store.get(_key);
-    if (bytes == null) return <String, String>{};
-    try {
-      final decoded = jsonDecode(utf8.decode(bytes));
-      if (decoded is! Map) return <String, String>{};
-      final rawPasswords = decoded['passwords'];
-      if (rawPasswords is! Map) return <String, String>{};
-      final out = <String, String>{};
-      for (final entry in rawPasswords.entries) {
-        if (entry.value is String) {
-          out[entry.key.toString()] = entry.value as String;
-        }
-      }
-      return out;
-    } catch (_) {
-      return <String, String>{};
+    if (bytes == null) {
+      return StoredLoad<Map<String, String>>.absent(<String, String>{});
     }
+    final top = decodeStoredJsonBytes<Map<dynamic, dynamic>>(
+      bytes,
+      empty: () => const <dynamic, dynamic>{},
+      parse: (decoded) {
+        if (decoded is! Map) {
+          throw const FormatException('凭据金库顶层不是 JSON 对象');
+        }
+        final rawPasswords = decoded['passwords'];
+        if (rawPasswords is! Map) {
+          throw const FormatException('凭据金库缺少 passwords 对象');
+        }
+        return rawPasswords;
+      },
+    );
+    if (top.isCorrupt) {
+      return StoredLoad<Map<String, String>>.corrupt(
+        <String, String>{},
+        top.error,
+      );
+    }
+    final out = <String, String>{};
+    Object? firstError;
+    for (final entry in top.value.entries) {
+      if (entry.value is String) {
+        out[entry.key.toString()] = entry.value as String;
+      } else {
+        firstError ??= const FormatException('凭据金库包含非字符串密码条目');
+      }
+    }
+    return firstError == null
+        ? StoredLoad<Map<String, String>>.ok(out)
+        : StoredLoad<Map<String, String>>.corrupt(out, firstError);
   }
 
-  Future<void> _write(Map<String, String> passwords) async {
+  Future<void> _write(
+    StoredLoad<Map<String, String>> previous,
+    Map<String, String> passwords,
+  ) async {
+    await backupCorruptSecureEntry(_store, _key, previous);
     final encoded = jsonEncode(<String, dynamic>{'passwords': passwords});
     await _store.put(_key, Uint8List.fromList(utf8.encode(encoded)));
   }

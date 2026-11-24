@@ -1537,6 +1537,298 @@ void main() {
         isEmpty,
       );
     });
+
+    test('auth worker re-bind and --use keep saved username, baseUrl and systemType when the gateway reports none', () async {
+      final store = InMemoryCliSessionStore();
+      final (workerClient, _) = buildMockWorkerGateway();
+      final anonymousClient = MockClient((req) async {
+        return http.Response(
+          jsonEncode(<String, Object?>{
+            'ok': true,
+            'authenticated': true,
+            'systemId': '',
+            'baseUrl': '',
+            'username': '',
+            'identity': <String, String>{},
+          }),
+          200,
+          headers: const <String, String>{'content-type': 'application/json'},
+        );
+      });
+
+      final bind = await _invokeCli(
+        <String>['auth', 'worker', '--url', workerUrl, '--name', 'main', '--api-key-stdin', '--json'],
+        store: store,
+        stdinLine: validKey,
+        workerHttpClient: workerClient,
+      );
+      expect(bind.exitCode, equals(0), reason: bind.stderr);
+      final initial = (await store.load())!;
+      expect(initial.username, equals('20250000'));
+      expect(initial.baseUrl, isNotEmpty);
+      expect(initial.systemType, equals('zf'));
+
+      final rebind = await _invokeCli(
+        <String>['auth', 'worker', '--url', workerUrl, '--json'],
+        store: store,
+        workerHttpClient: anonymousClient,
+      );
+      expect(rebind.exitCode, equals(0), reason: rebind.stderr);
+      final afterRebind = (await store.load())!;
+      expect(afterRebind.username, equals('20250000'));
+      expect(afterRebind.baseUrl, equals(initial.baseUrl));
+      expect(afterRebind.systemType, equals('zf'));
+      expect(afterRebind.findSavedWorker('main')!.username, equals('20250000'));
+      expect(afterRebind.findSavedWorker('main')!.baseUrl, equals(initial.baseUrl));
+      expect(afterRebind.findSavedWorker('main')!.systemType, equals('zf'));
+
+      final use = await _invokeCli(
+        <String>['auth', 'worker', '--use', 'main', '--json'],
+        store: store,
+        workerHttpClient: anonymousClient,
+      );
+      expect(use.exitCode, equals(0), reason: use.stderr);
+      final afterUse = (await store.load())!;
+      expect(afterUse.username, equals('20250000'));
+      expect(afterUse.baseUrl, equals(initial.baseUrl));
+      expect(afterUse.systemType, equals('zf'));
+      expect(afterUse.findSavedWorker('main')!.username, equals('20250000'));
+      expect(afterUse.findSavedWorker('main')!.baseUrl, equals(initial.baseUrl));
+      expect(afterUse.findSavedWorker('main')!.systemType, equals('zf'));
+    });
+
+    test('Cookie import uses the hidden input callback in interactive mode', () async {
+      final store = InMemoryCliSessionStore();
+      final result = await _invokeCli(
+        <String>[
+          'auth',
+          'import-cookie',
+          '--url',
+          'https://portal.example.edu',
+          '--cookie-stdin',
+          '--no-verify',
+        ],
+        store: store,
+        hiddenPassword: '{"JSESSIONID":"interactive-fixture"}',
+        stdinAll: '{"JSESSIONID":"pipe-fixture"}',
+      );
+      expect(result.exitCode, 0);
+      expect((await store.load())?.cookies['JSESSIONID'], 'interactive-fixture');
+    });
+
+    test('Worker environment key is scoped to its configured gateway', () async {
+      var requests = 0;
+      final client = MockClient((_) async {
+        requests += 1;
+        return http.Response('', 500);
+      });
+      final result = await _invokeCli(
+        <String>['--worker', 'https://other.example.edu', 'whoami', '--json'],
+        env: const <String, String>{
+          CliCredentialStore.envWorkerUrl: workerUrl,
+          CliCredentialStore.envApiKey: validKey,
+        },
+        workerHttpClient: client,
+      );
+      expect(result.exitCode, 1);
+      expect(requests, 0);
+    });
+
+    test('worker cache [status|clear] and global --no-cache manage and bypass Worker proxy cache', () async {
+      final capturedProxyPayloads = <Map<String, Object?>>[];
+      final seenCacheCalls = <String>[];
+
+      final cacheClient = MockClient((req) async {
+        if (req.headers['authorization'] != 'Bearer $validKey') {
+          return http.Response('{"status":"UNAUTHORIZED"}', 401);
+        }
+        if (req.url.path == '/v1/cache' && req.method == 'GET') {
+          seenCacheCalls.add('GET /v1/cache');
+          return http.Response(
+            jsonEncode(<String, Object?>{
+              'ok': true,
+              'enabled': true,
+              'stats': const <String, Object?>{
+                'entryCount': 2,
+                'totalBytes': 3072,
+                'hits': 5,
+                'l1Hits': 4,
+                'l2Hits': 1,
+                'misses': 2,
+                'bypasses': 1,
+                'evictions': 0,
+              },
+              'categories': const <Map<String, Object?>>[
+                <String, Object?>{
+                  'category': 'grades',
+                  'ttlSec': 300,
+                  'activeEntries': 2,
+                  'bytes': 3072,
+                },
+              ],
+            }),
+            200,
+            headers: const <String, String>{'content-type': 'application/json'},
+          );
+        }
+        if (req.url.path == '/v1/cache' && req.method == 'DELETE') {
+          final q = req.url.query.isEmpty ? '' : '?${req.url.query}';
+          seenCacheCalls.add('DELETE /v1/cache$q');
+          final isGrades = req.url.queryParameters['category'] == 'grades';
+          return http.Response(
+            jsonEncode(<String, Object?>{
+              'ok': true,
+              'clearedCount': isGrades ? 1 : 2,
+              'category': isGrades ? 'grades' : 'all',
+            }),
+            200,
+            headers: const <String, String>{'content-type': 'application/json'},
+          );
+        }
+        if (req.url.path == '/v1/session' && req.method == 'GET') {
+          return http.Response(
+            jsonEncode(<String, Object?>{
+              'ok': true,
+              'authenticated': true,
+              'alive': true,
+              'baseUrl': 'https://jwglxt.qust.edu.cn/jwglxt',
+              'systemId': 'ZF',
+              'username': '20250000',
+              'identity': const <String, String>{
+                'name': '测试同学',
+                'studentId': '20250000',
+              },
+            }),
+            200,
+            headers: const <String, String>{'content-type': 'application/json'},
+          );
+        }
+        if (req.url.path == '/v1/proxy' && req.method == 'POST') {
+          final body = jsonDecode(req.body) as Map<String, Object?>;
+          capturedProxyPayloads.add(body);
+          final targetUrl = body['url'] as String? ?? '';
+          final respBody = targetUrl.contains('cjcx_cxXsgrcj.html')
+              ? jsonEncode(<String, Object?>{
+                  'items': const <Map<String, Object?>>[
+                    <String, Object?>{
+                      'xnmmc': '2025-2026',
+                      'xqmmc': '1',
+                      'kch': 'CS101',
+                      'kcmc': '高等数学',
+                      'cj': '93',
+                      'jd': '4.3',
+                      'xf': '4.0',
+                      'kcxzmc': '必修',
+                    },
+                  ],
+                })
+              : '<html><body>ok</body></html>';
+          return http.Response(
+            jsonEncode(<String, Object?>{
+              'status': 200,
+              'finalUrl': targetUrl,
+              'headers': const <String, List<String>>{
+                'content-type': <String>['application/json; charset=utf-8'],
+              },
+              'bodyBase64': base64Encode(utf8.encode(respBody)),
+            }),
+            200,
+            headers: const <String, String>{'content-type': 'application/json'},
+          );
+        }
+        return http.Response('not found', 404);
+      });
+
+      const workerEnv = <String, String>{
+        CliCredentialStore.envWorkerUrl: workerUrl,
+        CliCredentialStore.envApiKey: validKey,
+      };
+
+      // 1. Default `worker cache` routes to status (both text and JSON)
+      final statusJson = await _invokeCli(
+        <String>['worker', 'cache', '--json'],
+        env: workerEnv,
+        workerHttpClient: cacheClient,
+      );
+      expect(statusJson.exitCode, equals(0), reason: statusJson.stderr);
+      expect(statusJson.jsonMap['enabled'], isTrue);
+      expect(statusJson.jsonMap['entryCount'], equals(2));
+      expect(statusJson.jsonMap['formattedSize'], equals('3.0 KB'));
+      expect(statusJson.jsonMap['hits'], equals(5));
+
+      final statusText = await _invokeCli(
+        <String>['worker', 'cache', 'status'],
+        env: workerEnv,
+        workerHttpClient: cacheClient,
+      );
+      expect(statusText.exitCode, equals(0), reason: statusText.stderr);
+      expect(statusText.stdout, contains('云端 Worker 代理缓存状态'));
+      expect(statusText.stdout, contains('grades'));
+
+      // 2. `worker cache clear --category grades` and full `worker cache clear`
+      final clearGrades = await _invokeCli(
+        <String>['worker', 'cache', 'clear', '--category', 'grades', '--json'],
+        env: workerEnv,
+        workerHttpClient: cacheClient,
+      );
+      expect(clearGrades.exitCode, equals(0), reason: clearGrades.stderr);
+      expect(clearGrades.jsonMap['category'], equals('grades'));
+      expect(clearGrades.jsonMap['clearedCount'], equals(1));
+
+      final clearAll = await _invokeCli(
+        <String>['worker', 'cache', 'clear', '--json'],
+        env: workerEnv,
+        workerHttpClient: cacheClient,
+      );
+      expect(clearAll.exitCode, equals(0), reason: clearAll.stderr);
+      expect(clearAll.jsonMap['category'], equals('all'));
+      expect(clearAll.jsonMap['clearedCount'], equals(2));
+
+      expect(
+        seenCacheCalls,
+        equals(const <String>[
+          'GET /v1/cache',
+          'GET /v1/cache',
+          'DELETE /v1/cache?category=grades',
+          'DELETE /v1/cache',
+        ]),
+      );
+
+      // 3. Invalid --category is rejected before hitting network
+      final badCat = await _invokeCli(
+        <String>['worker', 'cache', 'clear', '--category', 'invalid_cat', '--json'],
+        env: workerEnv,
+        workerHttpClient: cacheClient,
+      );
+      expect(badCat.exitCode, equals(1));
+      expect(badCat.jsonMap['code'], equals('INVALID_ARGS'));
+
+      // 4. Global --no-cache sets bypassCache: true on all proxied academic requests
+      final gradesWithCache = await _invokeCli(
+        <String>['grades', '--json'],
+        env: workerEnv,
+        workerHttpClient: cacheClient,
+      );
+      expect(gradesWithCache.exitCode, equals(0), reason: gradesWithCache.stderr);
+      expect(capturedProxyPayloads, isNotEmpty);
+      expect(
+        capturedProxyPayloads.every((p) => !p.containsKey('bypassCache')),
+        isTrue,
+      );
+
+      capturedProxyPayloads.clear();
+      final gradesNoCache = await _invokeCli(
+        <String>['--no-cache', 'grades', '--json'],
+        env: workerEnv,
+        workerHttpClient: cacheClient,
+      );
+      expect(gradesNoCache.exitCode, equals(0), reason: gradesNoCache.stderr);
+      expect(capturedProxyPayloads, isNotEmpty);
+      expect(
+        capturedProxyPayloads.every((p) => p['bypassCache'] == true),
+        isTrue,
+      );
+    });
   });
 }
 

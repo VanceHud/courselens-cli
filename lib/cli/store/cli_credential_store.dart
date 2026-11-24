@@ -2,13 +2,11 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'cli_session_store.dart';
+import 'macos_keychain.dart';
 
-/// Injectable process execution signature used by [KeychainCliSessionStore]
-/// and POSIX permission helpers.
+/// Injectable process execution signature for POSIX permission helpers.
 typedef CliProcessRunner = Future<ProcessResult> Function(
-  String executable,
-  List<String> arguments,
-);
+    String executable, List<String> arguments);
 
 /// Resolves the appropriate [CliSessionStore] implementation for the active OS,
 /// CLI flags, and environment variables while strictly upholding Security
@@ -33,7 +31,7 @@ class CliCredentialStore {
     String? sessionFilePath,
     Map<String, String>? environment,
     String? operatingSystem,
-    CliProcessRunner? processRunner,
+    CliKeychain? keychain,
     CliProcessRunner? chmodRunner,
     String keychainService = defaultKeychainService,
     String keychainAccount = defaultKeychainAccount,
@@ -53,7 +51,7 @@ class CliCredentialStore {
           operatingSystem: os,
           service: keychainService,
           account: keychainAccount,
-          processRunner: processRunner,
+          keychain: keychain,
         );
 
       case CliStoreKind.file:
@@ -79,7 +77,7 @@ class CliCredentialStore {
             operatingSystem: os,
             service: keychainService,
             account: keychainAccount,
-            processRunner: processRunner,
+            keychain: keychain,
           );
         }
         return FileCliSessionStore(
@@ -139,17 +137,22 @@ class EnvCliSessionStore implements CliSessionStore {
 
   @override
   Future<CliSessionRecord?> load() async {
-    final workerUrl =
-        _nonEmptyOrNull(_environment[CliCredentialStore.envWorkerUrl]);
+    final workerUrl = _nonEmptyOrNull(
+      _environment[CliCredentialStore.envWorkerUrl],
+    );
     final apiKey = _nonEmptyOrNull(_environment[CliCredentialStore.envApiKey]);
-    final baseUrl =
-        _nonEmptyOrNull(_environment[CliCredentialStore.envBaseUrl]);
-    final username =
-        _nonEmptyOrNull(_environment[CliCredentialStore.envUsername]);
-    final systemType =
-        _nonEmptyOrNull(_environment[CliCredentialStore.envSchoolType]);
-    final relayUrl =
-        _nonEmptyOrNull(_environment[CliCredentialStore.envRelayUrl]);
+    final baseUrl = _nonEmptyOrNull(
+      _environment[CliCredentialStore.envBaseUrl],
+    );
+    final username = _nonEmptyOrNull(
+      _environment[CliCredentialStore.envUsername],
+    );
+    final systemType = _nonEmptyOrNull(
+      _environment[CliCredentialStore.envSchoolType],
+    );
+    final relayUrl = _nonEmptyOrNull(
+      _environment[CliCredentialStore.envRelayUrl],
+    );
 
     if (workerUrl != null && apiKey != null) {
       final workerUri = Uri.tryParse(workerUrl);
@@ -160,7 +163,9 @@ class EnvCliSessionStore implements CliSessionStore {
       }
       if (baseUrl != null) {
         final targetUri = Uri.tryParse(baseUrl);
-        if (targetUri == null || !targetUri.hasScheme || targetUri.host.isEmpty) {
+        if (targetUri == null ||
+            !targetUri.hasScheme ||
+            targetUri.host.isEmpty) {
           throw CliStorageUnavailableException(
             'Invalid ${CliCredentialStore.envBaseUrl}: "$baseUrl" is not a valid HTTP(S) URL.',
           );
@@ -180,8 +185,9 @@ class EnvCliSessionStore implements CliSessionStore {
 
     if (baseUrl == null) return null;
 
-    final rawCookies =
-        _nonEmptyOrNull(_environment[CliCredentialStore.envCookies]);
+    final rawCookies = _nonEmptyOrNull(
+      _environment[CliCredentialStore.envCookies],
+    );
     if (rawCookies == null && username == null) {
       return null;
     }
@@ -242,186 +248,66 @@ class EnvCliSessionStore implements CliSessionStore {
   }
 }
 
-/// macOS Keychain session store backed by `/usr/bin/security`.
-///
-/// Per Security Redline #1, any failure other than item-not-found on [load] or
-/// [clear] throws [CliStorageUnavailableException] immediately without ever
-/// falling back to a plaintext file.
+/// macOS Keychain store backed by Security.framework in the CLI process.
 class KeychainCliSessionStore implements CliSessionStore {
   KeychainCliSessionStore({
     String? operatingSystem,
     this.service = CliCredentialStore.defaultKeychainService,
     this.account = CliCredentialStore.defaultKeychainAccount,
-    CliProcessRunner? processRunner,
+    CliKeychain? keychain,
   })  : _operatingSystem =
             (operatingSystem ?? Platform.operatingSystem).trim().toLowerCase(),
-        _processRunner = processRunner ?? _defaultProcessRunner;
-
-  static const String securityExecutable = '/usr/bin/security';
-
-  /// `/usr/bin/security` exit code for `errSecItemNotFound` (`-25300`).
-  static const int errSecItemNotFoundExitCode = 44;
+        _keychain = keychain;
 
   final String _operatingSystem;
   final String service;
   final String account;
-  final CliProcessRunner _processRunner;
+  CliKeychain? _keychain;
 
   @override
   String get backendDescription => 'keychain ($service:$account)';
 
-  @override
-  Future<CliSessionRecord?> load() async {
-    _ensureMacOs();
-    final result = await _runSecurity(<String>[
-      'find-generic-password',
-      '-s',
-      service,
-      '-a',
-      account,
-      '-w',
-    ]);
-
-    if (_isItemNotFound(result)) {
-      return null;
-    }
-    if (result.exitCode != 0) {
-      throw CliStorageUnavailableException(
-        'macOS Keychain read failed (exit ${result.exitCode}): '
-        '${_formatProcessError(result)}',
-      );
-    }
-
-    final rawPayload = '${result.stdout}'.trim();
-    if (rawPayload.isEmpty) {
-      throw const CliStorageUnavailableException(
-        'macOS Keychain entry is empty or corrupted.',
-      );
-    }
-
-    final decodedText = _decodeKeychainSecret(rawPayload);
-    try {
-      final jsonObj = jsonDecode(decodedText);
-      if (jsonObj is! Map<Object?, Object?>) {
-        throw const FormatException('Root JSON value must be an object.');
-      }
-      final typed = <String, Object?>{
-        for (final e in jsonObj.entries) '${e.key}': e.value,
-      };
-      final parsed = CliSessionRecord.fromJson(typed);
-      return parsed.backendName == 'keychain'
-          ? parsed
-          : parsed.copyWith(backendName: 'keychain');
-    } on FormatException catch (e) {
-      throw CliStorageUnavailableException(
-        'Corrupted session payload in macOS Keychain: ${e.message}',
-      );
-    }
-  }
-
-  @override
-  Future<void> save(CliSessionRecord record) async {
-    _ensureMacOs();
-    final stamped = record.backendName == 'keychain'
-        ? record
-        : record.copyWith(backendName: 'keychain');
-    final payload = _encodeAsciiSafeJson(stamped.toJson());
-
-    final result = await _runSecurity(<String>[
-      'add-generic-password',
-      '-U',
-      '-s',
-      service,
-      '-a',
-      account,
-      '-w',
-      payload,
-    ]);
-
-    if (result.exitCode != 0) {
-      throw CliStorageUnavailableException(
-        'macOS Keychain write failed (exit ${result.exitCode}): '
-        '${_formatProcessError(result)}',
-      );
-    }
-  }
-
-  @override
-  Future<void> clear() async {
-    _ensureMacOs();
-    final result = await _runSecurity(<String>[
-      'delete-generic-password',
-      '-s',
-      service,
-      '-a',
-      account,
-    ]);
-
-    if (result.exitCode == 0 || _isItemNotFound(result)) {
-      return;
-    }
-    throw CliStorageUnavailableException(
-      'macOS Keychain delete failed (exit ${result.exitCode}): '
-      '${_formatProcessError(result)}',
-    );
-  }
-
-  void _ensureMacOs() {
+  T _access<T>(T Function(CliKeychain) operation) {
     if (_operatingSystem != 'macos') {
-      throw CliStorageUnavailableException(
-        'macOS Keychain store is unavailable on "$_operatingSystem".',
+      throw const CliStorageUnavailableException(
+        'macOS Keychain is unavailable on this platform.',
       );
     }
-  }
-
-  Future<ProcessResult> _runSecurity(List<String> args) async {
     try {
-      return await _processRunner(securityExecutable, args);
-    } on Object catch (e) {
-      throw CliStorageUnavailableException(
-        'Failed to invoke $securityExecutable: $e',
+      return operation(_keychain ??= MacOsKeychain());
+    } on CliStorageUnavailableException {
+      rethrow;
+    } on Object {
+      throw const CliStorageUnavailableException(
+        'macOS Keychain data or framework could not be accessed.',
       );
     }
   }
 
-  static bool _isItemNotFound(ProcessResult result) {
-    if (result.exitCode == errSecItemNotFoundExitCode) return true;
-    final stderrLower = '${result.stderr}'.toLowerCase();
-    return stderrLower.contains('could not be found in the keychain') ||
-        stderrLower.contains('item could not be found') ||
-        stderrLower.contains('errsecitemnotfound') ||
-        stderrLower.contains('-25300');
-  }
+  @override
+  Future<CliSessionRecord?> load() async => _access((keychain) {
+        final payload = keychain.read(service, account);
+        if (payload == null) return null;
+        final json = jsonDecode(payload);
+        if (json is! Map<String, dynamic>) {
+          throw const FormatException('Keychain record must be a JSON object.');
+        }
+        return CliSessionRecord.fromJson(json)
+            .copyWith(backendName: 'keychain');
+      });
 
-  /// Encodes [jsonMap] as standard RFC 8259 JSON with non-ASCII runes escaped
-  /// as `\uXXXX` so `/usr/bin/security find-generic-password -w` always prints
-  /// plain JSON text instead of falling back to hexadecimal output.
-  static String _encodeAsciiSafeJson(Map<String, Object?> jsonMap) {
-    final raw = jsonEncode(jsonMap);
-    final buffer = StringBuffer();
-    for (final codeUnit in raw.codeUnits) {
-      if (codeUnit >= 0x20 && codeUnit <= 0x7E) {
-        buffer.writeCharCode(codeUnit);
-      } else {
-        buffer.write(r'\u');
-        buffer.write(codeUnit.toRadixString(16).padLeft(4, '0'));
-      }
-    }
-    return buffer.toString();
-  }
+  @override
+  Future<void> save(CliSessionRecord record) async => _access(
+        (keychain) => keychain.write(
+          service,
+          account,
+          jsonEncode(record.copyWith(backendName: 'keychain').toJson()),
+        ),
+      );
 
-  /// Handles both direct JSON text and hexadecimal output from `security -w`.
-  static String _decodeKeychainSecret(String raw) {
-    if (raw.startsWith('{')) return raw;
-    if (raw.length.isEven && RegExp(r'^[0-9a-fA-F]+$').hasMatch(raw)) {
-      final bytes = <int>[];
-      for (var i = 0; i < raw.length; i += 2) {
-        bytes.add(int.parse(raw.substring(i, i + 2), radix: 16));
-      }
-      return utf8.decode(bytes, allowMalformed: true).trim();
-    }
-    return raw;
-  }
+  @override
+  Future<void> clear() async =>
+      _access((keychain) => keychain.delete(service, account));
 }
 
 /// POSIX `0600`-enforced JSON session file store (`~/.config/courselens/session.json`).
@@ -590,8 +476,10 @@ class FileCliSessionStore implements CliSessionStore {
       result = await Process.run('chmod', <String>[octalMode, targetPath]);
     } on ProcessException {
       try {
-        result =
-            await Process.run('/bin/chmod', <String>[octalMode, targetPath]);
+        result = await Process.run('/bin/chmod', <String>[
+          octalMode,
+          targetPath,
+        ]);
       } on Object catch (e) {
         throw CliStorageUnavailableException(
           'Unable to execute chmod $octalMode on "$targetPath": $e',
@@ -641,12 +529,6 @@ class InMemoryCliSessionStore implements CliSessionStore {
     _record = null;
   }
 }
-
-Future<ProcessResult> _defaultProcessRunner(
-  String executable,
-  List<String> arguments,
-) =>
-    Process.run(executable, arguments);
 
 String? _nonEmptyOrNull(String? raw) {
   if (raw == null) return null;

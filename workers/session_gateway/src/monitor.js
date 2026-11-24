@@ -20,6 +20,7 @@ import {
   firstHeaderValue,
   isLoginPageHtml,
   isSessionExpiredExchange,
+  safeJsonParse,
   trimTrailingSlash,
 } from "./protocol.js";
 
@@ -94,14 +95,6 @@ export function computeNextSubMonitorWakeMs(sub, nowMs = Date.now()) {
     return nowMs + intervalMs;
   }
   return Math.max(nowMs + 1000, sub.lastRunAtMs + intervalMs);
-}
-
-function safeJsonParse(body) {
-  try {
-    return JSON.parse(String(body || ""));
-  } catch {
-    return null;
-  }
 }
 
 function pickStr(row, keys) {

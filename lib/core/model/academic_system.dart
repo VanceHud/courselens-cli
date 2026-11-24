@@ -32,4 +32,8 @@ enum AcademicSystem {
     }
     return null;
   }
+
+  /// 解析外部来源（CLI 参数、持久化记录、网关响应）的系统标识；
+  /// 缺失或无法识别时统一回落为 [AUTO]，交由探测流程判定。
+  static AcademicSystem fromIdOrAuto(String? id) => fromId(id) ?? AUTO;
 }

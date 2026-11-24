@@ -32,6 +32,40 @@ class ExamEntry {
   final String startTime;
   final String endTime;
 
+  Map<String, Object?> toJson() => <String, Object?>{
+        'name': name,
+        'time': time,
+        'location': location,
+        'seat': seat,
+        'examName': examName,
+        'teacher': teacher,
+        'termId': termId,
+        'campus': campus,
+        'examMethod': examMethod,
+        'credits': credits,
+        'courseCode': courseCode,
+        'examDate': examDate,
+        'startTime': startTime,
+        'endTime': endTime,
+      };
+
+  factory ExamEntry.fromJson(Map<String, dynamic> json) => ExamEntry(
+        name: json['name'] as String? ?? '',
+        time: json['time'] as String? ?? '',
+        location: json['location'] as String? ?? '',
+        seat: json['seat'] as String? ?? '',
+        examName: json['examName'] as String? ?? '',
+        teacher: json['teacher'] as String? ?? '',
+        termId: json['termId'] as String? ?? '',
+        campus: json['campus'] as String? ?? '',
+        examMethod: json['examMethod'] as String? ?? '',
+        credits: json['credits'] as String? ?? '',
+        courseCode: json['courseCode'] as String? ?? '',
+        examDate: json['examDate'] as String? ?? '',
+        startTime: json['startTime'] as String? ?? '',
+        endTime: json['endTime'] as String? ?? '',
+      );
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||

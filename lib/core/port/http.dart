@@ -1,4 +1,17 @@
+import 'dart:async';
 import 'dart:typed_data';
+
+/// 通过异步 Zone 向下游网关引擎传递「跳过服务端代理缓存」意图，避免污染发往教务源站的请求头。
+abstract final class HttpCacheScope {
+  static final Object _bypassCacheZoneKey = Object();
+
+  /// 当前异步调用链是否要求跳过远端有状态 Worker 代理缓存。
+  static bool get isBypassCache => Zone.current[_bypassCacheZoneKey] == true;
+
+  /// 在跳过服务端代理缓存的上下文中执行 [action]（常用于手动强制刷新）。
+  static Future<T> runBypassingCache<T>(Future<T> Function() action) =>
+      runZoned(action, zoneValues: <Object, Object>{_bypassCacheZoneKey: true});
+}
 
 /// 平台无关的 HTTP 方法定义。
 enum HttpMethod {
@@ -20,6 +33,7 @@ class HttpRequest {
     Map<String, String> headers = const {},
     Uint8List? body,
     this.followRedirects = true,
+    this.confirmedSelection = false,
   })  : headers = Map.unmodifiable(headers),
         body = body == null ? null : Uint8List.fromList(body);
 
@@ -28,6 +42,7 @@ class HttpRequest {
   final Map<String, String> headers;
   final Uint8List? body;
   final bool followRedirects;
+  final bool confirmedSelection;
 
   @override
   String toString() =>

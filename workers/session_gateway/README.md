@@ -9,6 +9,7 @@
 - **凭据不出个人边界**：学号、密码与 `COURSELENS_API_KEY` 以 Cloudflare Worker **Encrypted Secrets** 存储；会话 `CookieJar` 在个人 Durable Object SQLite 中以 **AES-256-GCM**（HKDF 派生密钥）静态加密，永不下发客户端。
 - **默认零后台唤醒（懒保活）**：`KEEPALIVE_INTERVAL_SEC=0` 时平时完全休眠不消耗配额；仅当 CLI 发起请求且上游返回过期时，才在云端单航班自动重登并透明重放。
 - **动态扫码 Cookie 注入**：若学校强制图形验证码或企业微信/钉钉扫码登录，可在填写 `PORTAL_PASSWORD` 时填 `COOKIE_ONLY`，部署后使用 `courselens worker push-cookies` 注入浏览器已登录 Cookie。
+- **双层加密代理缓存**：对只读教务查询提供 DO 内存 + AES-256-GCM 加密 SQLite 双层缓存（按数据分类独立 TTL、单飞去重），支持 `courselens worker cache [status|clear]` 管理与 `--no-cache` 强制回源；选课/退课/余量/登录永不缓存。
 - **可选成绩/考试变动巡检与推送**：内置默认关闭的 `monitor:grades` / `monitor:exams` 与 Bark / 飞书 / 钉钉 / 企微 / Telegram / 通用 HMAC Webhook 通知。
 
 ## 部署后绑定 CourseLens CLI
@@ -31,6 +32,11 @@ courselens today
 - `PORTAL_CAS_URL`：学校 CAS 登录地址（如 `https://sso.example.edu.cn/cas/login`）
 - `ALLOWED_HOSTS`：额外允许转发的教务主机白名单（逗号分隔，`PORTAL_URL` 与 `PORTAL_CAS_URL` 所在域名已自动加入白名单）
 - `SCHOOL_NAME`：自定义显示的学校名称
+- `PROXY_CACHE_ENABLED` / `CACHE_TTL_*_SEC`：按需关闭或覆写各类只读查询的代理缓存 TTL
+
+## 查询与选退课
+
+`/v1/proxy` 仅接收已知的只读教务查询，并按会话隔离缓存；`/v1/selection` 接收带 `confirmed: true` 的正方受控选退课写入请求（写操作完成或返回 `RESULT_UNKNOWN` 时自动失效课表/已选/培养方案缓存）。升级至 `1.1.8` 时请同步更新 Worker 与 CLI（可使用 `courselens update`）。重新上报会话 Cookie 会自动隔离并清空旧缓存。
 
 ## 本地开发与自测
 

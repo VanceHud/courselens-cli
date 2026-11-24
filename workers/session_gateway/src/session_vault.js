@@ -1,3 +1,4 @@
+import { isReadOnlyProxyRequest, isSelectionWrite } from "./proxy_policy.js";
 /**
  * PortalSessionVault Durable Object (SQLite-backed).
  *
@@ -43,6 +44,12 @@ import {
   readBoundedResponseBytes,
 } from "./protocol.js";
 import {
+  ProxyResponseCache,
+  classifyProxyCacheRequest,
+  computeProxyCacheKey,
+  sanitizeCachedHeaders,
+} from "./proxy_cache.js";
+import {
   createDefaultWebhookConfig,
   dispatchWebhookNotification,
   sanitizeWebhookConfigForClient,
@@ -61,6 +68,13 @@ const STORAGE_KEYS = {
   webhook: "v1:webhook",
   monitor: "v1:monitor",
   keepalive: "v1:keepalive",
+  cookiesUnreadable: "v1:cookies:unreadable",
+  webhookUnreadable: "v1:webhook:unreadable",
+};
+
+const UNREADABLE_ENVELOPE_KEYS = {
+  cookies: STORAGE_KEYS.cookiesUnreadable,
+  webhook: STORAGE_KEYS.webhookUnreadable,
 };
 
 function createInitialKeepaliveTaskState() {
@@ -117,29 +131,43 @@ async function encryptJsonForStorage(payloadObj, config, env) {
   };
 }
 
-async function decryptJsonFromStorage(savedEnvelope, config, env, fallbackValue) {
-  if (!savedEnvelope) return fallbackValue;
-  if (Array.isArray(savedEnvelope) && Array.isArray(fallbackValue)) {
-    return savedEnvelope;
+function isEncryptedEnvelope(value) {
+  return (
+    typeof value === "object" &&
+    value.v === 1 &&
+    (value.alg === "AES-256-GCM" || value.alg === "AES-GCM") &&
+    typeof value.iv === "string" &&
+    typeof value.ct === "string"
+  );
+}
+
+/**
+ * Reads a stored encrypted envelope and reports why it could not be used, so callers can tell
+ * "nothing stored" (`absent`) apart from "stored but undecryptable" (`unreadable`, e.g. after a
+ * vault key change or storage corruption).
+ */
+async function readJsonFromStorage(savedEnvelope, config, env, { allowLegacyArray = false } = {}) {
+  if (savedEnvelope === undefined || savedEnvelope === null) return { status: "absent" };
+  if (allowLegacyArray && Array.isArray(savedEnvelope)) {
+    return { status: "ok", value: savedEnvelope };
   }
-  if (
-    typeof savedEnvelope === "object" &&
-    savedEnvelope.v === 1 &&
-    (savedEnvelope.alg === "AES-256-GCM" || savedEnvelope.alg === "AES-GCM") &&
-    typeof savedEnvelope.iv === "string" &&
-    typeof savedEnvelope.ct === "string"
-  ) {
-    try {
-      const key = await deriveVaultAesKey(config, env);
-      const iv = base64ToBytes(savedEnvelope.iv);
-      const ct = base64ToBytes(savedEnvelope.ct);
-      const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
-      return JSON.parse(new TextDecoder().decode(plainBuf));
-    } catch {
-      return fallbackValue;
-    }
+  if (!isEncryptedEnvelope(savedEnvelope)) {
+    return { status: "unreadable", reason: "UNRECOGNIZED_ENVELOPE" };
   }
-  return fallbackValue;
+  let plainBuf;
+  try {
+    const key = await deriveVaultAesKey(config, env);
+    const iv = base64ToBytes(savedEnvelope.iv);
+    const ct = base64ToBytes(savedEnvelope.ct);
+    plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
+  } catch {
+    return { status: "unreadable", reason: "DECRYPT_FAILED" };
+  }
+  try {
+    return { status: "ok", value: JSON.parse(new TextDecoder().decode(plainBuf)) };
+  } catch {
+    return { status: "unreadable", reason: "INVALID_PAYLOAD" };
+  }
 }
 
 export class PortalSessionVault {
@@ -159,6 +187,14 @@ export class PortalSessionVault {
     this._authGeneration = 0;
     this._vaultEpoch = 0;
     this._nextAlarmMs = null;
+    this._unreadableEnvelopes = { cookies: null, webhook: null };
+    this._inFlightProxy = new Map();
+    this._proxyCache = new ProxyResponseCache({
+      storage: ctx.storage,
+      encryptFn: (obj, cfg) => encryptJsonForStorage(obj, cfg, this.env),
+      decryptFn: (envelope, cfg) => readJsonFromStorage(envelope, cfg, this.env),
+      getEpochFn: () => this._vaultEpoch,
+    });
   }
 
   _now() {
@@ -194,6 +230,7 @@ export class PortalSessionVault {
   }
 
   async _ensureHydrated(config) {
+    const currentFp = await computeConfigFingerprint(config);
     if (!this._hydratePromise) {
       this._hydratePromise = (async () => {
         const [
@@ -203,6 +240,8 @@ export class PortalSessionVault {
           savedWebhook,
           savedMonitor,
           savedKeepalive,
+          savedCookiesUnreadable,
+          savedWebhookUnreadable,
           existingAlarm,
         ] = await Promise.all([
           this.ctx.storage.get(STORAGE_KEYS.fingerprint),
@@ -211,29 +250,59 @@ export class PortalSessionVault {
           this.ctx.storage.get(STORAGE_KEYS.webhook),
           this.ctx.storage.get(STORAGE_KEYS.monitor),
           this.ctx.storage.get(STORAGE_KEYS.keepalive),
+          this.ctx.storage.get(STORAGE_KEYS.cookiesUnreadable),
+          this.ctx.storage.get(STORAGE_KEYS.webhookUnreadable),
           typeof this.ctx.storage.getAlarm === "function"
             ? this.ctx.storage.getAlarm()
             : Promise.resolve(null),
         ]);
 
         this._fingerprint = typeof savedFp === "string" ? savedFp : "";
-        const decryptedCookies = await decryptJsonFromStorage(savedCookies, config, this.env, []);
-        this._jar = ServerCookieJar.fromJSON(
-          Array.isArray(decryptedCookies) ? decryptedCookies : [],
-          this._now(),
-        );
-        this._meta = savedMeta && typeof savedMeta === "object" ? savedMeta : null;
-        this._authGeneration =
-          Number.isInteger(this._meta?.authGeneration) && this._meta.authGeneration > 0
-            ? this._meta.authGeneration
-            : (this._meta ? 1 : 0);
+        const priorConfigChanged =
+          Boolean(this._fingerprint) && this._fingerprint !== currentFp;
+        this._unreadableEnvelopes = {
+          cookies: summarizeUnreadableRecord(savedCookiesUnreadable),
+          webhook: summarizeUnreadableRecord(savedWebhookUnreadable),
+        };
+        if (priorConfigChanged) {
+          // Static portal config changed: savedCookies belonged to the previous config
+          // and will be cleared by the fingerprint migration right below.
+          this._jar = new ServerCookieJar();
+          this._meta = null;
+          this._authGeneration = 0;
+        } else {
+          const cookiesRead = await readJsonFromStorage(savedCookies, config, this.env, {
+            allowLegacyArray: true,
+          });
+          if (cookiesRead.status === "unreadable") {
+            await this._preserveUnreadableEnvelope(
+              "cookies",
+              savedCookies,
+              cookiesRead.reason,
+              savedCookiesUnreadable,
+            );
+          }
+          this._jar = ServerCookieJar.fromJSON(
+            cookiesRead.status === "ok" && Array.isArray(cookiesRead.value) ? cookiesRead.value : [],
+            this._now(),
+          );
+          this._meta = savedMeta && typeof savedMeta === "object" ? savedMeta : null;
+          this._authGeneration =
+            Number.isInteger(this._meta?.authGeneration) && this._meta.authGeneration > 0
+              ? this._meta.authGeneration
+              : (this._meta ? 1 : 0);
+        }
 
-        const decryptedWebhook = await decryptJsonFromStorage(
-          savedWebhook,
-          config,
-          this.env,
-          null,
-        );
+        const webhookRead = await readJsonFromStorage(savedWebhook, config, this.env);
+        if (webhookRead.status === "unreadable") {
+          await this._preserveUnreadableEnvelope(
+            "webhook",
+            savedWebhook,
+            webhookRead.reason,
+            savedWebhookUnreadable,
+          );
+        }
+        const decryptedWebhook = webhookRead.status === "ok" ? webhookRead.value : null;
         if (decryptedWebhook && typeof decryptedWebhook === "object") {
           this._webhook = { ...createDefaultWebhookConfig(), ...decryptedWebhook };
         } else if (this.env.NOTIFY_WEBHOOK_URL) {
@@ -261,7 +330,6 @@ export class PortalSessionVault {
     }
     await this._hydratePromise;
 
-    const currentFp = await computeConfigFingerprint(config);
     if (this._fingerprint !== currentFp) {
       const hadPriorFp = Boolean(this._fingerprint);
       this._fingerprint = currentFp;
@@ -273,10 +341,55 @@ export class PortalSessionVault {
         this._jar = new ServerCookieJar();
         this._meta = null;
         this._scopeCache = { baseUrl: "", scopes: null, expiresAtMs: 0 };
+        this._inFlightProxy.clear();
         await this.ctx.storage.delete(STORAGE_KEYS.cookies);
         await this.ctx.storage.delete(STORAGE_KEYS.meta);
+        await this._clearUnreadableEnvelope("cookies");
+        await this._proxyCache.clearAll();
       }
     }
+  }
+
+  /**
+   * Copies an envelope that exists but cannot be decrypted/parsed to a side key before the
+   * hydrated fallback value can overwrite it, logs a non-secret reason and surfaces it in
+   * `/v1/session` (and `/v1/webhook`) so operators can restore the previous key or reset.
+   */
+  async _preserveUnreadableEnvelope(name, envelope, reason, existingRecord = null) {
+    const alreadyPreserved =
+      existingRecord &&
+      typeof existingRecord === "object" &&
+      existingRecord.reason === reason &&
+      Number.isFinite(existingRecord.detectedAtMs) &&
+      sameSerializedValue(existingRecord.envelope, envelope);
+    const detectedAtMs = alreadyPreserved ? existingRecord.detectedAtMs : this._now();
+    if (!alreadyPreserved) {
+      await this.ctx.storage.put(UNREADABLE_ENVELOPE_KEYS[name], {
+        reason,
+        detectedAtMs,
+        envelope,
+      });
+    }
+    this._unreadableEnvelopes[name] = { reason, detectedAtMs };
+    console.warn(
+      `[PortalSessionVault] Stored ${name} envelope is unreadable (${reason}); ` +
+        `preserved under "${UNREADABLE_ENVELOPE_KEYS[name]}" and continuing without it. ` +
+        "Restore the previous API key / portal config to recover it, or reset explicitly.",
+    );
+  }
+
+  async _clearUnreadableEnvelope(name) {
+    this._unreadableEnvelopes[name] = null;
+    await this.ctx.storage.delete(UNREADABLE_ENVELOPE_KEYS[name]);
+  }
+
+  _formatUnreadableEnvelope(name) {
+    const info = this._unreadableEnvelopes[name];
+    if (!info) return null;
+    return {
+      reason: info.reason,
+      detectedAt: info.detectedAtMs ? new Date(info.detectedAtMs).toISOString() : null,
+    };
   }
 
   async _persistState(config, expectedEpoch = this._vaultEpoch) {
@@ -426,7 +539,20 @@ export class PortalSessionVault {
       }
 
       const commitMs = this._now();
+      const previousId = this._meta?.studentInfo?.studentId;
+      const nextId = authResult.identity.studentId || config.username;
+      if (this._meta?.cookieInjected && previousId && previousId !== nextId) {
+        throw new PortalProtocolError(
+          "SESSION_EXPIRED",
+          "上报会话已失效，请重新上报该账号的 Cookie",
+          401,
+        );
+      }
       this._jar.replaceFrom(authResult.jar, commitMs);
+      const cacheScope =
+        previousId && previousId === nextId
+          ? this._meta.cacheScope
+          : crypto.randomUUID();
       const nextGen = Math.max(this._authGeneration, generationBeforeLogin) + 1;
       this._authGeneration = nextGen;
       this._meta = {
@@ -440,6 +566,8 @@ export class PortalSessionVault {
           className: authResult.identity.className || "",
         },
         authGeneration: nextGen,
+        cacheScope,
+        cookieInjected: this._meta?.cookieInjected === true,
         authenticatedAtMs: nowMs,
         lastVerifiedAtMs: commitMs,
         lastClientAccessAtMs: this._meta?.lastClientAccessAtMs || commitMs,
@@ -509,6 +637,7 @@ export class PortalSessionVault {
       keepaliveIntervalSec,
       capabilities: [
         "proxy",
+        "proxy-cache",
         "cookie-push",
         "cloud-tasks",
         "webhook",
@@ -518,6 +647,10 @@ export class PortalSessionVault {
       monitorExamsEnabled: Boolean(this._monitor.exams.enabled),
       activeTaskCount: this._countActiveCloudTasks(config),
       nextAlarmAt: this._nextAlarmMs ? new Date(this._nextAlarmMs).toISOString() : null,
+      unreadableVault: {
+        cookies: this._formatUnreadableEnvelope("cookies"),
+        webhook: this._formatUnreadableEnvelope("webhook"),
+      },
     };
   }
 
@@ -550,6 +683,8 @@ export class PortalSessionVault {
       if (path === "/v1/session/refresh" && method === "POST") {
         await this._ensureAuthenticated(config, { force: true });
         const refreshEpoch = this._vaultEpoch;
+        this._inFlightProxy.clear();
+        await this._proxyCache.clearAll();
         if (this._meta) {
           this._meta.lastClientAccessAtMs = this._now();
           await this._persistState(config, refreshEpoch);
@@ -567,15 +702,49 @@ export class PortalSessionVault {
         this._jar = new ServerCookieJar();
         this._meta = null;
         this._scopeCache = { baseUrl: "", scopes: null, expiresAtMs: 0 };
+        this._inFlightProxy.clear();
         await this.ctx.storage.delete(STORAGE_KEYS.cookies);
         await this.ctx.storage.delete(STORAGE_KEYS.meta);
+        await this._clearUnreadableEnvelope("cookies");
+        await this._proxyCache.clearAll();
         await this._scheduleNextAlarm(config, this._vaultEpoch);
         return jsonOut(200, { ok: true, cleared: true });
       }
 
-      // --- Stateful Portal Proxy ---
+      // --- Stateful Portal Proxy & Proxy Cache Management ---
       if (path === "/v1/proxy" && method === "POST") {
         return await this._handleProxy(request, config);
+      }
+      if (path === "/v1/selection" && method === "POST") {
+        return await this._handleProxy(request, config, true);
+      }
+      if (path === "/v1/cache" && method === "GET") {
+        await this._ensureHydrated(config);
+        return jsonOut(200, await this._proxyCache.getStatsPayload(config, this._now()));
+      }
+      if (path === "/v1/cache" && method === "DELETE") {
+        await this._ensureHydrated(config);
+        const queryCat = (url.searchParams.get("category") || "").trim().toLowerCase();
+        let category = queryCat;
+        if (!category) {
+          try {
+            const body = await this._readJsonBody(request);
+            if (typeof body.category === "string") {
+              category = body.category.trim().toLowerCase();
+            }
+          } catch {
+            // Empty or non-JSON DELETE body clears all cache entries.
+          }
+        }
+        this._inFlightProxy.clear();
+        const clearedCount = category
+          ? await this._proxyCache.invalidateCategories([category])
+          : await this._proxyCache.clearAll();
+        return jsonOut(200, {
+          ok: true,
+          clearedCount,
+          category: category || "all",
+        });
       }
 
       // --- Unified Cloud Task Center (/v1/tasks & /v1/tasks/:taskId) ---
@@ -590,7 +759,11 @@ export class PortalSessionVault {
       // --- Multi-provider Webhook Center (/v1/webhook*) ---
       if (path === "/v1/webhook" && method === "GET") {
         await this._ensureHydrated(config);
-        return jsonOut(200, { ok: true, ...sanitizeWebhookConfigForClient(this._webhook) });
+        return jsonOut(200, {
+          ok: true,
+          ...sanitizeWebhookConfigForClient(this._webhook),
+          unreadableEnvelope: this._formatUnreadableEnvelope("webhook"),
+        });
       }
       if (path === "/v1/webhook" && (method === "PUT" || method === "POST")) {
         return await this._handleUpdateWebhook(request, config);
@@ -598,7 +771,12 @@ export class PortalSessionVault {
       if (path === "/v1/webhook" && method === "DELETE") {
         await this._ensureHydrated(config);
         this._webhook = createDefaultWebhookConfig();
-        await this._persistWebhook(config);
+        if (this.env.NOTIFY_WEBHOOK_URL) {
+          await this._persistWebhook(config);
+        } else {
+          await this.ctx.storage.delete(STORAGE_KEYS.webhook);
+        }
+        await this._clearUnreadableEnvelope("webhook");
         return jsonOut(200, { ok: true, ...sanitizeWebhookConfigForClient(this._webhook) });
       }
       if (path === "/v1/webhook/test" && method === "POST") {
@@ -816,7 +994,11 @@ export class PortalSessionVault {
     }
 
     const commitMs = this._now();
-    this._jar.replaceFrom(stagingJar, commitMs);
+    const activeEpoch = ++this._vaultEpoch;
+    this._jar = stagingJar;
+    this._loginPromise = null;
+    this._scopeCache = { baseUrl: "", scopes: null, expiresAtMs: 0 };
+    this._inFlightProxy.clear();
     this._authGeneration += 1;
     const resolvedUsername =
       String(body.username || "").trim() ||
@@ -829,12 +1011,14 @@ export class PortalSessionVault {
       systemId: probe.systemId || resolvedSystem,
       username: resolvedUsername,
       studentInfo: {
-        name: probe.identity.name || this._meta?.studentInfo?.name || "",
+        name: probe.identity.name || "",
         studentId: probe.identity.studentId || resolvedUsername,
-        department: probe.identity.department || this._meta?.studentInfo?.department || "",
-        className: probe.identity.className || this._meta?.studentInfo?.className || "",
+        department: probe.identity.department || "",
+        className: probe.identity.className || "",
       },
       authGeneration: this._authGeneration,
+      cacheScope: crypto.randomUUID(),
+      cookieInjected: true,
       authenticatedAtMs: commitMs,
       lastVerifiedAtMs: commitMs,
       lastClientAccessAtMs: commitMs,
@@ -849,12 +1033,14 @@ export class PortalSessionVault {
           this._keepaliveTask.overrideEnabled = true;
           this._keepaliveTask.intervalSec = Math.min(7200, Math.max(60, sec));
         }
-        await this._persistKeepaliveTask(epochBeforeProbe);
+        await this._persistKeepaliveTask(activeEpoch);
       }
     }
 
-    await this._persistState(config, epochBeforeProbe);
-    await this._scheduleNextAlarm(config, epochBeforeProbe);
+    await this._proxyCache.clearAll();
+    await this._persistState(config, activeEpoch);
+    await this._scheduleNextAlarm(config, activeEpoch);
+    this._requireProxyEpoch(activeEpoch, false);
     return jsonOut(200, {
       ...this._formatSessionResponse(config, { alive: true }),
       injectedCookieCount: this._jar.size(commitMs),
@@ -900,7 +1086,11 @@ export class PortalSessionVault {
     next.updatedAtMs = this._now();
     this._webhook = next;
     await this._persistWebhook(config);
-    return jsonOut(200, { ok: true, ...sanitizeWebhookConfigForClient(this._webhook) });
+    return jsonOut(200, {
+      ok: true,
+      ...sanitizeWebhookConfigForClient(this._webhook),
+      unreadableEnvelope: this._formatUnreadableEnvelope("webhook"),
+    });
   }
 
   async _handleTestWebhook(config) {
@@ -1076,6 +1266,11 @@ export class PortalSessionVault {
       this._monitor[kind] = subState;
       await this._persistState(config, runEpoch);
       await this._persistMonitor(runEpoch);
+      if (Array.isArray(changes) && changes.length > 0) {
+        await this._proxyCache.invalidateCategories(
+          kind === "grades" ? ["grades", "progress"] : ["exams"],
+        );
+      }
       if (notification) {
         await this._notifyEvents(config, [notification]);
       }
@@ -1416,10 +1611,112 @@ export class PortalSessionVault {
   }
 
   // -------------------------------------------------------------------------
-  // Stateful Portal Proxy (/v1/proxy) — Lazy Re-authentication Preserved 100%
+  // Stateful Portal Proxy (/v1/proxy) — Lazy Re-authentication + Dual-Layer Cache
   // -------------------------------------------------------------------------
 
-  async _handleProxy(request, config) {
+  async _executeUpstreamProxyExchange({
+    method,
+    targetUrl,
+    headers,
+    bodyBytes,
+    followRedirects,
+    policy,
+    config,
+    selectionWrite = false,
+  }) {
+    // Ensure an active portal session exists before dispatching the first attempt.
+    const epochBeforeAuth = this._vaultEpoch;
+    await this._ensureAuthenticated(config, { force: false });
+    this._requireProxyEpoch(epochBeforeAuth, false);
+    const attemptGen = this._authGeneration;
+    const activeEpoch = this._vaultEpoch;
+    const maxResponseBytes = this._maxUpstreamResponseBytes();
+    const allowRequest = selectionWrite
+      ? null
+      : (verb, url) => isReadOnlyProxyRequest(verb, url, policy);
+
+    let exchange = await executeWithCookieJar({
+      method,
+      url: targetUrl,
+      headers,
+      bodyBytes,
+      followRedirects: followRedirects && !selectionWrite,
+      uncertainWrite: selectionWrite,
+      allowRequest,
+      jar: this._jar,
+      policy,
+      fetchImpl: this._fetchImpl(),
+      timeoutMs: this._timeoutMs(),
+      allowPrivateLoopback: this._allowLoopback(),
+      nowFn: () => this._now(),
+      maxResponseBytes,
+    });
+
+    this._requireProxyEpoch(activeEpoch, selectionWrite);
+    if (
+      selectionWrite &&
+      ((exchange.status >= 300 && exchange.status < 400) ||
+        isSessionExpiredExchange(exchange))
+    ) {
+      throw new PortalProtocolError(
+        "RESULT_UNKNOWN",
+        "选退课响应无法确认，请核对已选名单",
+        504,
+      );
+    }
+
+    // Only read-only proxy requests may re-authenticate and replay.
+    const canSafelyReplay =
+      method === "GET" ||
+      exchange.hopCount === 0 ||
+      exchange.firstHopWasLoginRedirect === true;
+
+    if (!selectionWrite && isSessionExpiredExchange(exchange) && canSafelyReplay) {
+      await this._ensureAuthenticated(config, {
+        force: true,
+        staleGeneration: attemptGen,
+      });
+      this._requireProxyEpoch(activeEpoch, false);
+      exchange = await executeWithCookieJar({
+        method,
+        url: targetUrl,
+        headers,
+        bodyBytes,
+        followRedirects,
+        allowRequest,
+        jar: this._jar,
+        policy,
+        fetchImpl: this._fetchImpl(),
+        timeoutMs: this._timeoutMs(),
+        allowPrivateLoopback: this._allowLoopback(),
+        nowFn: () => this._now(),
+        maxResponseBytes,
+      });
+    }
+
+    if (this._vaultEpoch === activeEpoch && this._meta) {
+      const nowMs = this._now();
+      this._meta.lastClientAccessAtMs = nowMs;
+      if (!isSessionExpiredExchange(exchange)) {
+        this._meta.lastVerifiedAtMs = nowMs;
+      }
+      await this._persistState(config, activeEpoch);
+      await this._scheduleNextAlarm(config, activeEpoch);
+    }
+
+    this._requireProxyEpoch(activeEpoch, selectionWrite);
+    return { exchange, activeEpoch };
+  }
+
+  _requireProxyEpoch(epoch, selectionWrite) {
+    if (epoch === this._vaultEpoch) return;
+    if (selectionWrite) {
+      throw new PortalProtocolError("RESULT_UNKNOWN", "会话已切换，请核对选退课结果", 504);
+    }
+    throw new PortalProtocolError("SESSION_EXPIRED", "会话已切换，请重新查询", 401);
+  }
+
+  async _handleProxy(request, config, selectionWrite = false) {
     let rawRequestBytes;
     try {
       rawRequestBytes = await readBoundedResponseBytes(request, MAX_PROXY_REQUEST_BYTES);
@@ -1449,18 +1746,41 @@ export class PortalSessionVault {
     }
     const targetUrl = String(payload.url || "").trim();
     const followRedirects = payload.followRedirects !== false;
+    const allowedHeaders = new Set([
+      "accept",
+      "accept-language",
+      "content-type",
+      "origin",
+      "referer",
+      "user-agent",
+      "x-requested-with",
+    ]);
     const headers =
       payload.headers && typeof payload.headers === "object" && !Array.isArray(payload.headers)
-        ? payload.headers
+        ? Object.fromEntries(
+            Object.entries(payload.headers).filter(([name]) =>
+              allowedHeaders.has(name.toLowerCase()),
+            ),
+          )
         : {};
     const bodyBytes = payload.bodyBase64 ? base64ToBytes(String(payload.bodyBase64)) : null;
+    const headerCacheDirective = String(request.headers.get("x-courselens-cache") || "")
+      .trim()
+      .toLowerCase();
+    const bypassCache =
+      payload.bypassCache === true ||
+      payload.cache === "bypass" ||
+      payload.cache === "no-store" ||
+      headerCacheDirective === "bypass" ||
+      headerCacheDirective === "no-cache";
 
     const policy = {
       allowedHosts: config.allowedHosts,
       requireSecure: config.requireSecure,
+      portalUrl: config.portalUrl,
     };
 
-    // Enforce HostPolicy & SSRF guard BEFORE triggering any cold-start upstream login.
+    // Enforce HostPolicy & SSRF guard BEFORE touching cache or triggering cold-start login.
     if (!isHostAllowed(targetUrl, policy.allowedHosts, policy.requireSecure)) {
       throw new PortalProtocolError(
         "UNTRUSTED_URL",
@@ -1477,73 +1797,283 @@ export class PortalSessionVault {
       );
     }
 
-    // Ensure an active portal session exists before dispatching the first attempt.
-    await this._ensureAuthenticated(config, { force: false });
-    const attemptGen = this._authGeneration;
-    let activeEpoch = this._vaultEpoch;
-    const maxResponseBytes = this._maxUpstreamResponseBytes();
+    await this._ensureHydrated(config);
+    policy.effectiveBaseUrl = this._meta?.effectiveBaseUrl;
+    if (selectionWrite) {
+      if (
+        method !== "POST" ||
+        payload.confirmed !== true ||
+        !bodyBytes?.length ||
+        !isSelectionWrite(targetUrl, policy)
+      ) {
+        throw new PortalProtocolError(
+          "VALIDATION_FAILED",
+          "选退课写入必须匹配受支持的路径并经显式确认",
+          400,
+        );
+      }
+    } else if (!isReadOnlyProxyRequest(method, targetUrl, policy)) {
+      throw new PortalProtocolError("UNTRUSTED_URL", "通用代理只支持已知的教务查询", 403);
+    }
+    const requestEpoch = this._vaultEpoch;
 
-    let exchange = await executeWithCookieJar({
+    const classification = classifyProxyCacheRequest({
       method,
       url: targetUrl,
-      headers,
       bodyBytes,
       followRedirects,
-      jar: this._jar,
-      policy,
-      fetchImpl: this._fetchImpl(),
-      timeoutMs: this._timeoutMs(),
-      allowPrivateLoopback: this._allowLoopback(),
-      nowFn: () => this._now(),
-      maxResponseBytes,
+      cacheConfig: config.cache,
     });
 
-    // Security Redline #3: Only auto-replay a POST if hop 0 itself was rejected prior to
-    // processing (hopCount === 0, or hop 0 redirected straight to a login URL). Never replay
-    // a POST whose hop 0 redirected to a non-login business endpoint.
-    const canSafelyReplay =
-      method === "GET" ||
-      exchange.hopCount === 0 ||
-      exchange.firstHopWasLoginRedirect === true;
+    if (classification.cacheable) {
+      if (!this._meta) {
+        await this._ensureAuthenticated(config, { force: false });
+        this._requireProxyEpoch(requestEpoch, false);
+      }
+      const scope = JSON.stringify([
+        this._meta.cacheScope,
+        this._meta.effectiveBaseUrl,
+        this._meta.studentInfo?.studentId || this._meta.username,
+      ]);
+      const cacheKey = await computeProxyCacheKey({ method, url: targetUrl, bodyBytes, scope });
+      this._requireProxyEpoch(requestEpoch, false);
+      const ttlSec = Math.floor(classification.ttlMs / 1000);
 
-    if (isSessionExpiredExchange(exchange) && canSafelyReplay) {
-      await this._ensureAuthenticated(config, {
-        force: true,
-        staleGeneration: attemptGen,
-      });
-      activeEpoch = this._vaultEpoch;
-      exchange = await executeWithCookieJar({
+      if (!bypassCache) {
+        const cached = await this._proxyCache.get(cacheKey, config, this._now());
+        this._requireProxyEpoch(requestEpoch, false);
+        if (cached.hit) {
+          return jsonOut(
+            200,
+            {
+              status: cached.entry.status,
+              finalUrl: cached.entry.finalUrl,
+              headers: cached.entry.headers,
+              bodyBase64: cached.entry.bodyBase64,
+              cache: {
+                status: "HIT",
+                layer: cached.layer,
+                category: cached.entry.category,
+                ageSec: cached.ageSec,
+                ttlSec: cached.ttlSec,
+              },
+            },
+            {
+              "X-CourseLens-Cache": "HIT",
+              "X-CourseLens-Cache-Category": cached.entry.category,
+              "X-CourseLens-Cache-Age": String(cached.ageSec),
+            },
+          );
+        }
+
+        // Single-flight deduplication for concurrent identical cacheable requests.
+        const existingInFlight = this._inFlightProxy.get(cacheKey);
+        if (existingInFlight && existingInFlight.epoch === this._vaultEpoch) {
+          const shared = await existingInFlight.promise;
+          this._requireProxyEpoch(requestEpoch, false);
+          this._proxyCache.recordInFlightHit();
+          return jsonOut(
+            200,
+            {
+              status: shared.status,
+              finalUrl: shared.finalUrl,
+              headers: shared.headers,
+              bodyBase64: shared.bodyBase64,
+              cache: {
+                status: "HIT",
+                layer: "INFLIGHT",
+                category: classification.category,
+                ageSec: 0,
+                ttlSec,
+              },
+            },
+            {
+              "X-CourseLens-Cache": "HIT",
+              "X-CourseLens-Cache-Category": classification.category,
+              "X-CourseLens-Cache-Age": "0",
+            },
+          );
+        }
+
+        this._proxyCache.recordMiss();
+        const flightEpoch = this._vaultEpoch;
+        const flightPromise = (async () => {
+          const { exchange, activeEpoch } = await this._executeUpstreamProxyExchange({
+            method,
+            targetUrl,
+            headers,
+            bodyBytes,
+            followRedirects,
+            policy,
+            config,
+          });
+          const cleanHeaders = sanitizeCachedHeaders(exchange.headers);
+          const bodyBase64 = bytesToBase64(exchange.bodyBytes);
+          if (
+            exchange.status === 200 &&
+            !isSessionExpiredExchange(exchange) &&
+            this._vaultEpoch === activeEpoch
+          ) {
+            await this._proxyCache.set(
+              cacheKey,
+              {
+                category: classification.category,
+                status: exchange.status,
+                finalUrl: exchange.finalUrl,
+                headers: cleanHeaders,
+                bodyBase64,
+                rawByteLength: exchange.bodyBytes.byteLength,
+                ttlMs: classification.ttlMs,
+              },
+              config,
+              this._now(),
+              activeEpoch,
+            );
+          }
+          return {
+            status: exchange.status,
+            finalUrl: exchange.finalUrl,
+            headers: cleanHeaders,
+            bodyBase64,
+          };
+        })().finally(() => {
+          const cur = this._inFlightProxy.get(cacheKey);
+          if (cur && cur.promise === flightPromise) {
+            this._inFlightProxy.delete(cacheKey);
+          }
+        });
+
+        this._inFlightProxy.set(cacheKey, { epoch: flightEpoch, promise: flightPromise });
+        const result = await flightPromise;
+        this._requireProxyEpoch(requestEpoch, false);
+        return jsonOut(
+          200,
+          {
+            status: result.status,
+            finalUrl: result.finalUrl,
+            headers: result.headers,
+            bodyBase64: result.bodyBase64,
+            cache: {
+              status: "MISS",
+              category: classification.category,
+              ageSec: 0,
+              ttlSec,
+            },
+          },
+          {
+            "X-CourseLens-Cache": "MISS",
+            "X-CourseLens-Cache-Category": classification.category,
+            "X-CourseLens-Cache-Age": "0",
+          },
+        );
+      }
+
+      // Explicit bypassCache: fetch fresh from upstream and refresh cache on valid 200.
+      this._proxyCache.recordBypass();
+      const { exchange, activeEpoch } = await this._executeUpstreamProxyExchange({
         method,
-        url: targetUrl,
+        targetUrl,
         headers,
         bodyBytes,
         followRedirects,
-        jar: this._jar,
         policy,
-        fetchImpl: this._fetchImpl(),
-        timeoutMs: this._timeoutMs(),
-        allowPrivateLoopback: this._allowLoopback(),
-        nowFn: () => this._now(),
-        maxResponseBytes,
+        config,
       });
-    }
-
-    if (this._vaultEpoch === activeEpoch && this._meta) {
-      const nowMs = this._now();
-      this._meta.lastClientAccessAtMs = nowMs;
-      if (!isSessionExpiredExchange(exchange)) {
-        this._meta.lastVerifiedAtMs = nowMs;
+      const cleanHeaders = sanitizeCachedHeaders(exchange.headers);
+      const bodyBase64 = bytesToBase64(exchange.bodyBytes);
+      if (
+        exchange.status === 200 &&
+        !isSessionExpiredExchange(exchange) &&
+        this._vaultEpoch === activeEpoch
+      ) {
+        await this._proxyCache.set(
+          cacheKey,
+          {
+            category: classification.category,
+            status: exchange.status,
+            finalUrl: exchange.finalUrl,
+            headers: cleanHeaders,
+            bodyBase64,
+            rawByteLength: exchange.bodyBytes.byteLength,
+            ttlMs: classification.ttlMs,
+          },
+          config,
+          this._now(),
+          activeEpoch,
+        );
       }
-      await this._persistState(config, activeEpoch);
-      await this._scheduleNextAlarm(config, activeEpoch);
+      this._requireProxyEpoch(requestEpoch, false);
+      return jsonOut(
+        200,
+        {
+          status: exchange.status,
+          finalUrl: exchange.finalUrl,
+          headers: cleanHeaders,
+          bodyBase64,
+          cache: {
+            status: "BYPASS",
+            category: classification.category,
+            ageSec: 0,
+            ttlSec,
+          },
+        },
+        {
+          "X-CourseLens-Cache": "BYPASS",
+          "X-CourseLens-Cache-Category": classification.category,
+          "X-CourseLens-Cache-Age": "0",
+        },
+      );
     }
 
-    return jsonOut(200, {
-      status: exchange.status,
-      finalUrl: exchange.finalUrl,
-      headers: exchange.headers,
-      bodyBase64: bytesToBase64(exchange.bodyBytes),
-    });
+    // Confirmed writes and known uncached queries.
+    let exchange;
+    try {
+      ({ exchange } = await this._executeUpstreamProxyExchange({
+        method,
+        targetUrl,
+        headers,
+        bodyBytes,
+        followRedirects,
+        policy,
+        config,
+        selectionWrite,
+      }));
+    } catch (err) {
+      if (
+        selectionWrite &&
+        classification.invalidates.length > 0 &&
+        this._vaultEpoch === requestEpoch &&
+        err?.status === "RESULT_UNKNOWN"
+      ) {
+        await this._proxyCache.invalidateCategories(classification.invalidates);
+      }
+      throw err;
+    }
+
+    if (classification.invalidates.length > 0 && this._vaultEpoch === requestEpoch) {
+      await this._proxyCache.invalidateCategories(classification.invalidates);
+    }
+
+    this._requireProxyEpoch(requestEpoch, selectionWrite);
+    return jsonOut(
+      200,
+      {
+        status: exchange.status,
+        finalUrl: exchange.finalUrl,
+        headers: exchange.headers,
+        bodyBase64: bytesToBase64(exchange.bodyBytes),
+        cache: {
+          status: "SKIP",
+          category: classification.category,
+          ageSec: 0,
+          ttlSec: 0,
+        },
+      },
+      {
+        "X-CourseLens-Cache": "SKIP",
+        "X-CourseLens-Cache-Category": classification.category,
+      },
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -1595,12 +2125,29 @@ export class PortalSessionVault {
   }
 }
 
-function jsonOut(status, body) {
+function summarizeUnreadableRecord(record) {
+  if (!record || typeof record !== "object") return null;
+  return {
+    reason: String(record.reason || "UNKNOWN"),
+    detectedAtMs: Number.isFinite(record.detectedAtMs) ? record.detectedAtMs : null,
+  };
+}
+
+function sameSerializedValue(a, b) {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
+function jsonOut(status, body, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
+      ...extraHeaders,
     },
   });
 }

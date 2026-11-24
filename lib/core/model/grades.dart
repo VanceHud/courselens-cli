@@ -8,6 +8,16 @@ class GradeSubItem {
   final String name;
   final String score;
 
+  Map<String, Object?> toJson() => <String, Object?>{
+        'name': name,
+        'score': score,
+      };
+
+  factory GradeSubItem.fromJson(Map<String, dynamic> json) => GradeSubItem(
+        name: json['name'] as String? ?? '',
+        score: json['score'] as String? ?? '',
+      );
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -56,6 +66,52 @@ class GradeEntry {
 
   bool get isMakeup => examNature.contains('补考');
   bool get isRetake => examNature.contains('重修');
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'name': name,
+        'score': score,
+        'credits': credits,
+        'gradePoint': gradePoint,
+        'term': term,
+        'detail': detail,
+        'courseCode': courseCode,
+        'jxbId': jxbId,
+        'numericScore': numericScore,
+        'category': category,
+        'examNature': examNature,
+        'teacher': teacher,
+        'department': department,
+        if (subItems.isNotEmpty)
+          'subItems': subItems.map((s) => s.toJson()).toList(growable: false),
+      };
+
+  factory GradeEntry.fromJson(Map<String, dynamic> json) {
+    final rawSub = json['subItems'];
+    final subs = <GradeSubItem>[];
+    if (rawSub is List) {
+      for (final item in rawSub) {
+        if (item is Map) {
+          subs.add(GradeSubItem.fromJson(Map<String, dynamic>.from(item)));
+        }
+      }
+    }
+    return GradeEntry(
+      name: json['name'] as String? ?? '',
+      score: json['score'] as String? ?? '',
+      credits: json['credits'] as String? ?? '',
+      gradePoint: json['gradePoint'] as String? ?? '',
+      term: json['term'] as String? ?? '',
+      detail: json['detail'] as String? ?? '',
+      courseCode: json['courseCode'] as String? ?? '',
+      jxbId: json['jxbId'] as String? ?? '',
+      numericScore: json['numericScore'] as String? ?? '',
+      category: json['category'] as String? ?? '',
+      examNature: json['examNature'] as String? ?? '',
+      teacher: json['teacher'] as String? ?? '',
+      department: json['department'] as String? ?? '',
+      subItems: List<GradeSubItem>.unmodifiable(subs),
+    );
+  }
 
   GradeEntry copyWith({
     String? name,
@@ -157,6 +213,47 @@ class GradeReport {
   final double earnedCredits;
   final double attemptedCredits;
   final Map<String, double> creditsByCategory;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'grades': grades.map((g) => g.toJson()).toList(growable: false),
+        'gradePointAverageRaw': gradePointAverageRaw,
+        'totalCreditsRaw': totalCreditsRaw,
+        'weightedAverageScore': weightedAverageScore,
+        'compulsoryGpa': compulsoryGpa,
+        'earnedCredits': earnedCredits,
+        'attemptedCredits': attemptedCredits,
+        'creditsByCategory': creditsByCategory,
+      };
+
+  factory GradeReport.fromJson(Map<String, dynamic> json) {
+    final rawGrades = json['grades'];
+    final list = <GradeEntry>[];
+    if (rawGrades is List) {
+      for (final item in rawGrades) {
+        if (item is Map) {
+          list.add(GradeEntry.fromJson(Map<String, dynamic>.from(item)));
+        }
+      }
+    }
+    final rawCat = json['creditsByCategory'];
+    final cats = <String, double>{};
+    if (rawCat is Map) {
+      for (final entry in rawCat.entries) {
+        final v = (entry.value as num?)?.toDouble();
+        if (v != null) cats[entry.key.toString()] = v;
+      }
+    }
+    return GradeReport(
+      grades: list,
+      gradePointAverageRaw: json['gradePointAverageRaw'] as String? ?? '',
+      totalCreditsRaw: json['totalCreditsRaw'] as String? ?? '',
+      weightedAverageScore: json['weightedAverageScore'] as String? ?? '--',
+      compulsoryGpa: json['compulsoryGpa'] as String? ?? '--',
+      earnedCredits: (json['earnedCredits'] as num?)?.toDouble() ?? 0.0,
+      attemptedCredits: (json['attemptedCredits'] as num?)?.toDouble() ?? 0.0,
+      creditsByCategory: cats,
+    );
+  }
 }
 
 /// 成绩总览统计。

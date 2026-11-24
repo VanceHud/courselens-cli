@@ -39,6 +39,16 @@ CORS_ORIGIN = "*"
 KEEPALIVE_INTERVAL_SEC = "0"
 # 会话探活缓存秒数（窗口内不重复向上游探活）
 SESSION_VERIFY_TTL_SEC = "120"
+# 只读教务查询代理缓存（DO 内存 + AES-256-GCM 加密 SQLite 双层缓存；选课/退课/余量永不缓存）
+PROXY_CACHE_ENABLED = "true"
+CACHE_TTL_CATALOG_SEC = "1800"
+CACHE_TTL_SCHEDULE_SEC = "1800"
+CACHE_TTL_GRADES_SEC = "300"
+CACHE_TTL_EXAMS_SEC = "600"
+CACHE_TTL_PROGRESS_SEC = "3600"
+CACHE_TTL_ENROLLED_SEC = "600"
+CACHE_TTL_CLASSROOMS_SEC = "120"
+CACHE_TTL_STATIC_SEC = "86400"
 
 # 敏感信息用以下命令注入，不要写进配置文件、不要提交进仓库：
 #   npx wrangler secret put COURSELENS_API_KEY --config wrangler.toml  # 客户端访问网关用的 API Key（自拟长随机串）

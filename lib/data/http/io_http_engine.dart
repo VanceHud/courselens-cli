@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import '../../core/courselens_core.dart';
 import 'http_policy_provider.dart';
+import 'uncertain_write.dart';
 
 /// 原生四端（Android / iOS / macOS / Windows）基于 `dart:io` 的 HTTP 引擎。
 ///
@@ -34,7 +35,7 @@ class IoHttpEngine implements HttpEngine {
 
   static io.HttpClient _createDefaultClient() {
     final client = io.HttpClient();
-    client.connectionTimeout = const Duration(seconds: 15);
+    client.connectionTimeout = const Duration(seconds: 8);
     client.idleTimeout = const Duration(seconds: 15);
     client.autoUncompress = true;
     return client;
@@ -59,6 +60,15 @@ class IoHttpEngine implements HttpEngine {
     }
 
     final startedWithPost = request.method == HttpMethod.post;
+    final initialUri = Uri.tryParse(request.url);
+    if (initialUri == null ||
+        (!initialUri.isScheme('http') && !initialUri.isScheme('https')) ||
+        (policy.requireSecure && !initialUri.isScheme('https')) ||
+        initialUri.host.isEmpty ||
+        initialUri.userInfo.isNotEmpty) {
+      throw const AcademicException(AcademicStatus.UNTRUSTED_URL, '非法请求地址');
+    }
+    final initialOrigin = initialUri.origin;
     var currentUrl = request.url;
     var currentMethod = request.method;
     var currentBody = request.body;
@@ -69,7 +79,11 @@ class IoHttpEngine implements HttpEngine {
 
     for (var hop = 0; hop <= maxRedirects; hop++) {
       final uri = Uri.tryParse(currentUrl);
-      if (uri == null || (!uri.isScheme('http') && !uri.isScheme('https'))) {
+      if (uri == null ||
+          (!uri.isScheme('http') && !uri.isScheme('https')) ||
+          (policy.requireSecure && !uri.isScheme('https')) ||
+          uri.host.isEmpty ||
+          uri.userInfo.isNotEmpty) {
         throw AcademicException(
           AcademicStatus.UNTRUSTED_URL,
           '非法请求地址：$currentUrl',
@@ -78,6 +92,7 @@ class IoHttpEngine implements HttpEngine {
 
       final response = await _sendSingleHop(
         uri: uri,
+        initialOrigin: initialOrigin,
         method: currentMethod,
         hop: hop,
         startedWithPost: startedWithPost,
@@ -115,10 +130,8 @@ class IoHttpEngine implements HttpEngine {
 
       if (hop == maxRedirects) {
         throw AcademicException(
-          startedWithPost
-              ? AcademicStatus.RESULT_UNKNOWN
-              : AcademicStatus.NETWORK_RETRYABLE,
-          '重定向次数超过上限（12 次）',
+          uncertainWriteStatus(mayHaveCommitted: startedWithPost),
+          '重定向次数超过上限（$maxRedirects 次）',
         );
       }
 
@@ -126,12 +139,20 @@ class IoHttpEngine implements HttpEngine {
         currentUrl,
         Urls.resolve(currentUrl, location),
       );
-      if (policy.allowedHosts.isNotEmpty &&
-          !HostPolicy.isAllowed(
-            nextUrl,
-            policy.allowedHosts,
-            policy.requireSecure,
-          )) {
+      final nextUri = Uri.tryParse(nextUrl);
+      final crossOriginPost =
+          (response.status == 307 || response.status == 308) &&
+          currentMethod == HttpMethod.post &&
+          (nextUri == null ||
+              (!nextUri.isScheme('http') && !nextUri.isScheme('https')) ||
+              nextUri.origin != uri.origin);
+      if (crossOriginPost ||
+          (policy.allowedHosts.isNotEmpty &&
+              !HostPolicy.isAllowed(
+                nextUrl,
+                policy.allowedHosts,
+                policy.requireSecure,
+              ))) {
         final blockedHeaders = <String, List<String>>{
           ...response.headers,
           HostGuardedHttpEngine.blockedRedirectHeader: <String>[nextUrl],
@@ -158,9 +179,7 @@ class IoHttpEngine implements HttpEngine {
     }
 
     throw AcademicException(
-      startedWithPost
-          ? AcademicStatus.RESULT_UNKNOWN
-          : AcademicStatus.NETWORK_RETRYABLE,
+      uncertainWriteStatus(mayHaveCommitted: startedWithPost),
       '重定向异常中断',
     );
   }
@@ -168,6 +187,7 @@ class IoHttpEngine implements HttpEngine {
   Future<({int status, Map<String, List<String>> headers, Uint8List body})>
       _sendSingleHop({
     required Uri uri,
+    required String initialOrigin,
     required HttpMethod method,
     required int hop,
     required bool startedWithPost,
@@ -185,10 +205,20 @@ class IoHttpEngine implements HttpEngine {
 
       var hasUserAgent = false;
       String? baseCookie;
+      final sameOrigin = uri.origin == initialOrigin;
       for (final entry in baseHeaders.entries) {
         final lower = entry.key.toLowerCase();
         if (lower == 'cookie') {
-          baseCookie = entry.value;
+          if (sameOrigin) baseCookie = entry.value;
+          continue;
+        }
+        if (!sameOrigin &&
+            const {
+              'authorization',
+              'proxy-authorization',
+              'origin',
+              'referer',
+            }.contains(lower)) {
           continue;
         }
         if (lower == 'content-length') continue;
@@ -241,37 +271,25 @@ class IoHttpEngine implements HttpEngine {
         body: chunks.takeBytes(),
       );
     } on TimeoutException {
-      final status = postMayHaveReachedUpstream
-          ? AcademicStatus.RESULT_UNKNOWN
-          : AcademicStatus.NETWORK_RETRYABLE;
-      throw AcademicException(
-        status,
-        '请求教务服务器超时，请检查校园网或 VPN 连接',
+      final status = uncertainWriteStatus(
+        mayHaveCommitted: postMayHaveReachedUpstream,
       );
+      throw AcademicException(status, '请求教务服务器超时，请检查校园网或 VPN 连接');
     } on io.HandshakeException catch (error) {
-      final status = postMayHaveReachedUpstream
-          ? AcademicStatus.RESULT_UNKNOWN
-          : AcademicStatus.NETWORK_RETRYABLE;
-      throw AcademicException(
-        status,
-        'TLS 证书握手失败：${error.message}',
+      final status = uncertainWriteStatus(
+        mayHaveCommitted: postMayHaveReachedUpstream,
       );
+      throw AcademicException(status, 'TLS 证书握手失败：${error.message}');
     } on io.SocketException catch (error) {
-      final status = postMayHaveReachedUpstream
-          ? AcademicStatus.RESULT_UNKNOWN
-          : AcademicStatus.NETWORK_RETRYABLE;
-      throw AcademicException(
-        status,
-        '网络连接失败：${error.message}',
+      final status = uncertainWriteStatus(
+        mayHaveCommitted: postMayHaveReachedUpstream,
       );
+      throw AcademicException(status, '网络连接失败：${error.message}');
     } on io.HttpException catch (error) {
-      final status = postMayHaveReachedUpstream
-          ? AcademicStatus.RESULT_UNKNOWN
-          : AcademicStatus.NETWORK_RETRYABLE;
-      throw AcademicException(
-        status,
-        'HTTP 协议错误：${error.message}',
+      final status = uncertainWriteStatus(
+        mayHaveCommitted: postMayHaveReachedUpstream,
       );
+      throw AcademicException(status, 'HTTP 协议错误：${error.message}');
     }
   }
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
 import test from "node:test";
 
@@ -138,6 +139,7 @@ test("public /health works and /v1/* enforces constant-time multi-key API Key au
   const healthJson = await healthRes.json();
   assert.equal(healthJson.ok, true);
   assert.equal(healthJson.mode, "stateful-worker");
+  assert.equal(healthJson.version, "1.1.8");
 
   // 2. OPTIONS CORS preflight
   const optRes = await worker.fetch(
@@ -318,7 +320,7 @@ test("Zhengfang RSA login, single-flight deduplication, DO eviction persistence,
   const harness = createDurableObjectHarness(env);
   env.SESSION_VAULT = harness.namespace;
 
-  const makeProxyReq = () =>
+  const makeProxyReq = ({ bypassCache = false } = {}) =>
     worker.fetch(
       new Request("https://worker.example.dev/v1/proxy", {
         method: "POST",
@@ -335,6 +337,7 @@ test("Zhengfang RSA login, single-flight deduplication, DO eviction persistence,
             Authorization: "Bearer should_not_leak_upstream",
           },
           bodyBase64: bytesToBase64(new TextEncoder().encode("xnm=2025&xqm=3")),
+          ...(bypassCache ? { bypassCache: true } : {}),
         }),
       }),
       env,
@@ -377,7 +380,7 @@ test("Zhengfang RSA login, single-flight deduplication, DO eviction persistence,
   // 3. Simulate upstream portal invalidating session (HTTP 901) -> transparent 1-shot re-login & replay
   sessionGeneration = 2;
   activeSessionId = "INVALIDATED_ON_SERVER";
-  const reloginRes = await makeProxyReq();
+  const reloginRes = await makeProxyReq({ bypassCache: true });
   assert.equal(reloginRes.status, 200);
   assert.equal(loginPostCount, 2, "Should automatically re-login once on HTTP 901");
   const reloginPayload = await reloginRes.json();
@@ -420,7 +423,7 @@ test("Security Redlines #3 (POST timeout -> 504 RESULT_UNKNOWN, zero retry) & #4
       res.end('<div class="infoContentTitle">王五-20230999</div>');
       return;
     }
-    if (reqUrl.pathname === "/jwglxt/xsxk/zzxkyzb_xkBcZyZzxkYzb.html" && req.method === "POST") {
+    if (reqUrl.pathname === "/jwglxt/xsxk/zzxkyzbjk_xkBcZyZzxkYzb.html" && req.method === "POST") {
       slowPostHits += 1;
       // Intentionally hang longer than __UPSTREAM_TIMEOUT_MS (80ms)
       setTimeout(() => {
@@ -449,7 +452,7 @@ test("Security Redlines #3 (POST timeout -> 504 RESULT_UNKNOWN, zero retry) & #4
 
   // 1. Redline #3: POST write timeout must return 504 RESULT_UNKNOWN with ZERO automatic retry
   const timeoutRes = await worker.fetch(
-    new Request("https://worker.example.dev/v1/proxy", {
+    new Request("https://worker.example.dev/v1/selection", {
       method: "POST",
       headers: {
         Authorization: "Bearer redline-key",
@@ -457,7 +460,8 @@ test("Security Redlines #3 (POST timeout -> 504 RESULT_UNKNOWN, zero retry) & #4
       },
       body: JSON.stringify({
         method: "POST",
-        url: `${mockPortal.origin}/jwglxt/xsxk/zzxkyzb_xkBcZyZzxkYzb.html`,
+        confirmed: true,
+        url: `${mockPortal.origin}/jwglxt/xsxk/zzxkyzbjk_xkBcZyZzxkYzb.html`,
         bodyBase64: bytesToBase64(new TextEncoder().encode("jxb_ids=ABC")),
       }),
     }),
@@ -644,6 +648,121 @@ test("CAS SSO and Qingzhi portal login flows establish server-side sessions", as
   assert.equal(qzJson.studentInfo.name, "孙七");
   assert.equal(qzJson.keepaliveMode, "lazy");
   assert.equal(qzJson.keepaliveIntervalSec, 0);
+});
+
+test("Qingzhi legacy grade query form load and POST submission are admitted as uncached proxy requests", async (t) => {
+  const hits = { frm: 0, queryGet: 0, queryPost: 0 };
+  const submittedBodies = [];
+
+  const mockQz = await startLocalMockServer((req, res) => {
+    const u = new URL(req.url, "http://127.0.0.1");
+    if (u.pathname === "/jsxsd/framework/xsMain.jsp") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end('<div id="Top1_divLoginName">强智老版同学</div>');
+      return;
+    }
+    if (u.pathname === "/jsxsd/kscj/cjcx_frm" && req.method === "GET") {
+      hits.frm += 1;
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end('<iframe src="/jsxsd/kscj/cjcx_query"></iframe>');
+      return;
+    }
+    if (u.pathname === "/jsxsd/kscj/cjcx_query" && req.method === "GET") {
+      hits.queryGet += 1;
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        `<form name="kscjQueryForm" action="/jsxsd/kscj/cjcx_query" method="post">` +
+          `<input type="hidden" name="xsfs" value="all" />` +
+          `<!-- hit-${hits.queryGet} -->` +
+          `</form>`,
+      );
+      return;
+    }
+    if (u.pathname === "/jsxsd/kscj/cjcx_query" && req.method === "POST") {
+      hits.queryPost += 1;
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        submittedBodies.push(Buffer.concat(chunks).toString("utf8"));
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(`<table><tr><td>高等数学</td><td>95</td><td>hit-${hits.queryPost}</td></tr></table>`);
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end("not found");
+  });
+  t.after(() => mockQz.close());
+
+  const env = {
+    COURSELENS_API_KEY: "qz-legacy-grades-key",
+    PORTAL_URL: `${mockQz.origin}/jsxsd`,
+    PORTAL_SYSTEM: "QZ",
+    PORTAL_USERNAME: "20233333",
+    PORTAL_COOKIES: "JSESSIONID=QZ_LEGACY_SID",
+    __ALLOW_LOOPBACK_FOR_TEST: true,
+  };
+  env.SESSION_VAULT = createDurableObjectHarness(env).namespace;
+
+  const proxy = (method, path, body = null) =>
+    worker.fetch(
+      new Request("https://worker.example.dev/v1/proxy", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer qz-legacy-grades-key",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          method,
+          url: `${mockQz.origin}${path}`,
+          ...(body !== null ? { bodyBase64: bytesToBase64(new TextEncoder().encode(body)) } : {}),
+        }),
+      }),
+      env,
+    );
+
+  // 1. Entry page (cached grades entry) loads iframe reference
+  const frmRes = await proxy("GET", "/jsxsd/kscj/cjcx_frm");
+  assert.equal(frmRes.status, 200);
+  assert.equal(frmRes.headers.get("x-courselens-cache"), "MISS");
+  assert.equal(hits.frm, 1);
+
+  // 2. Legacy query form GET is admitted and remains uncached
+  const formRes1 = await proxy("GET", "/jsxsd/kscj/cjcx_query");
+  assert.equal(formRes1.status, 200);
+  assert.equal(formRes1.headers.get("x-courselens-cache"), "SKIP");
+  const formHtml1 = Buffer.from((await formRes1.json()).bodyBase64, "base64").toString("utf8");
+  assert.match(formHtml1, /kscjQueryForm/);
+  assert.match(formHtml1, /hit-1/);
+
+  const formRes2 = await proxy("GET", "/jsxsd/kscj/cjcx_query");
+  assert.equal(formRes2.status, 200);
+  assert.equal(formRes2.headers.get("x-courselens-cache"), "SKIP");
+  assert.equal(hits.queryGet, 2, "Legacy Qingzhi form GET must not be cached");
+
+  // 3. Legacy query form POST submission is admitted and remains uncached
+  const postBody = "kksj=2025-2026-1&kcmc=&kcxz=&kcsx=&xsfs=all";
+  const postRes1 = await proxy("POST", "/jsxsd/kscj/cjcx_query", postBody);
+  assert.equal(postRes1.status, 200);
+  assert.equal(postRes1.headers.get("x-courselens-cache"), "SKIP");
+  const postHtml1 = Buffer.from((await postRes1.json()).bodyBase64, "base64").toString("utf8");
+  assert.match(postHtml1, /高等数学/);
+  assert.match(postHtml1, /hit-1/);
+
+  const postRes2 = await proxy("POST", "/jsxsd/kscj/cjcx_query", postBody);
+  assert.equal(postRes2.status, 200);
+  assert.equal(postRes2.headers.get("x-courselens-cache"), "SKIP");
+  assert.equal(hits.queryPost, 2, "Legacy Qingzhi form POST must not be cached");
+  assert.deepEqual(submittedBodies, [postBody, postBody]);
+
+  // 4. Only the exact kscj/cjcx_query route is admitted; sibling or nested paths stay rejected
+  const extraSuffix = await proxy("GET", "/jsxsd/kscj/cjcx_query_other");
+  assert.equal(extraSuffix.status, 403);
+  assert.equal((await extraSuffix.json()).status, "UNTRUSTED_URL");
+
+  const extraSubpath = await proxy("POST", "/jsxsd/kscj/cjcx_query/submit", postBody);
+  assert.equal(extraSubpath.status, 403);
+  assert.equal((await extraSubpath.json()).status, "UNTRUSTED_URL");
 });
 
 test("Default lazy keep-alive: zero idle alarms, legacy alarm cleanup, /v1/session verify TTL & staggered 901 generation deduplication", async (t) => {
@@ -1068,9 +1187,135 @@ test("Encrypts persisted cookies at rest with AES-256-GCM in DO storage and fenc
   assert.equal((await afterDeleteOffline.json()).authenticated, false);
 });
 
-test("Protects non-idempotent POST edge cases: 403 no-replay, post-redirect timeout -> 504 RESULT_UNKNOWN, login timeout -> 502 NETWORK_ERROR", async (t) => {
+test("Preserves and surfaces undecryptable cookie / webhook envelopes instead of silently discarding them", async (t) => {
+  const mockPortal = await startLocalMockServer((req, res) => {
+    const u = new URL(req.url, "http://127.0.0.1");
+    if (u.pathname === "/jwglxt/xtgl/index_cxYhxxIndex.html") {
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Set-Cookie": "JSESSIONID=UNREADABLE_TEST_COOKIE; Path=/jwglxt; HttpOnly",
+      });
+      res.end('<div class="infoContentTitle">密钥轮换-20260002</div>');
+      return;
+    }
+    res.writeHead(200);
+    res.end("ok");
+  });
+  t.after(() => mockPortal.close());
+  const warnings = [];
+  t.mock.method(console, "warn", (msg) => warnings.push(String(msg)));
+
+  const env = {
+    COURSELENS_API_KEY: "vault-unreadable-key",
+    PORTAL_URL: `${mockPortal.origin}/jwglxt`,
+    PORTAL_USERNAME: "20260002",
+    PORTAL_COOKIES: "SEED_COOKIE=UNREADABLE_SEED_VALUE",
+    __ALLOW_LOOPBACK_FOR_TEST: true,
+  };
+  const harness = createDurableObjectHarness(env);
+  env.SESSION_VAULT = harness.namespace;
+  const call = (path, init = {}) =>
+    worker.fetch(
+      new Request(`https://worker.example.dev${path}`, {
+        ...init,
+        headers: { Authorization: "Bearer vault-unreadable-key", ...(init.headers || {}) },
+      }),
+      env,
+    );
+
+  // Absent envelopes are a normal empty vault: no flag, no warning.
+  const fresh = await (await call("/v1/session")).json();
+  assert.equal(fresh.authenticated, true);
+  assert.deepEqual(fresh.unreadableVault, { cookies: null, webhook: null });
+  assert.equal(warnings.length, 0);
+
+  // Simulate a vault key change / corruption: envelopes exist but can no longer be decrypted.
+  const goodEnvelope = harness.backingMap.get("v1:cookies");
+  const ctBytes = Buffer.from(goodEnvelope.ct, "base64");
+  ctBytes[0] ^= 0xff;
+  const tamperedCookies = { ...goodEnvelope, ct: ctBytes.toString("base64") };
+  const tamperedWebhook = { ...tamperedCookies };
+  harness.backingMap.set("v1:cookies", structuredClone(tamperedCookies));
+  harness.backingMap.set("v1:webhook", structuredClone(tamperedWebhook));
+  harness.evictAndRecreateVault();
+
+  // Control clock to verify detectedAt stays stable across repeated evictions.
+  let nowMs = Date.UTC(2026, 4, 1, 10, 0, 0);
+  env.__NOW_FN = () => nowMs;
+
+  const offline = await (await call("/v1/session?offline=1")).json();
+  assert.equal(offline.authenticated, false, "Undecryptable cookies still hydrate as an empty jar");
+  assert.equal(offline.unreadableVault.cookies.reason, "DECRYPT_FAILED");
+  assert.equal(offline.unreadableVault.webhook.reason, "DECRYPT_FAILED");
+  assert.equal(typeof offline.unreadableVault.cookies.detectedAt, "string");
+  const firstWebhookDetectedAt = offline.unreadableVault.webhook.detectedAt;
+  assert.equal(warnings.length, 2);
+  assert.ok(warnings.every((w) => w.includes("DECRYPT_FAILED")));
+  assert.ok(warnings.every((w) => !w.includes("vault-unreadable-key")));
+  assert.deepEqual(harness.backingMap.get("v1:cookies:unreadable").envelope, tamperedCookies);
+  assert.deepEqual(harness.backingMap.get("v1:webhook:unreadable").envelope, tamperedWebhook);
+
+  const webhookView = await (await call("/v1/webhook")).json();
+  assert.equal(webhookView.enabled, false);
+  assert.equal(webhookView.unreadableEnvelope.reason, "DECRYPT_FAILED");
+
+  // Re-login overwrites v1:cookies, but the unreadable original stays preserved and flagged,
+  // including after another eviction (and the still-unreadable webhook keeps its first detectedAt).
+  const relogged = await (await call("/v1/session")).json();
+  assert.equal(relogged.authenticated, true);
+  assert.notDeepEqual(harness.backingMap.get("v1:cookies"), tamperedCookies);
+  assert.deepEqual(harness.backingMap.get("v1:cookies:unreadable").envelope, tamperedCookies);
+  nowMs += 60_000;
+  harness.evictAndRecreateVault();
+  const rehydrated = await (await call("/v1/session?offline=1")).json();
+  assert.equal(rehydrated.authenticated, true);
+  assert.equal(rehydrated.unreadableVault.cookies.reason, "DECRYPT_FAILED");
+  assert.equal(rehydrated.unreadableVault.webhook.detectedAt, firstWebhookDetectedAt);
+  assert.equal(warnings.length, 3, "Only the still-unreadable webhook envelope warns again");
+
+  // Updating webhook surfaces the still-preserved unreadableEnvelope consistently with GET /v1/webhook.
+  const updatedWebhook = await (
+    await call("/v1/webhook", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "https://hooks.example.com/notify", enabled: true }),
+    })
+  ).json();
+  assert.equal(updatedWebhook.ok, true);
+  assert.equal(updatedWebhook.unreadableEnvelope.reason, "DECRYPT_FAILED");
+
+  // Explicit resets acknowledge and drop the preserved envelopes.
+  assert.equal((await call("/v1/session", { method: "DELETE" })).status, 200);
+  assert.equal(harness.backingMap.has("v1:cookies:unreadable"), false);
+  assert.equal((await call("/v1/webhook", { method: "DELETE" })).status, 200);
+  assert.equal(harness.backingMap.has("v1:webhook:unreadable"), false);
+  const cleared = await (await call("/v1/session?offline=1")).json();
+  assert.deepEqual(cleared.unreadableVault, { cookies: null, webhook: null });
+
+  // Falsy non-nullish corrupt values (e.g. empty string) are treated as unreadable, not absent.
+  harness.backingMap.set("v1:webhook", "");
+  harness.evictAndRecreateVault();
+  const falsyView = await (await call("/v1/session?offline=1")).json();
+  assert.equal(falsyView.unreadableVault.webhook.reason, "UNRECOGNIZED_ENVELOPE");
+  assert.equal(warnings.length, 4);
+  assert.equal((await call("/v1/webhook", { method: "DELETE" })).status, 200);
+
+  // Rotating static portal credentials triggers a clean fingerprint migration without a
+  // spurious cookies unreadable warning.
+  await call("/v1/session");
+  env.PORTAL_COOKIES = "SEED_COOKIE=ROTATED_SEED_VALUE";
+  const warningsBeforeMigration = warnings.length;
+  harness.evictAndRecreateVault();
+  const migrated = await (await call("/v1/session?offline=1")).json();
+  assert.equal(migrated.authenticated, false);
+  assert.deepEqual(migrated.unreadableVault, { cookies: null, webhook: null });
+  assert.equal(warnings.length, warningsBeforeMigration);
+});
+
+test("Protects non-idempotent POST edge cases: 403 no-replay, write redirect -> 504 RESULT_UNKNOWN, login timeout -> 502 NETWORK_ERROR", async (t) => {
   let businessPostCount = 0;
   let redirectMutateCount = 0;
+  let receiptCount = 0;
   let loginPostCount = 0;
   let hangLoginPost = false;
 
@@ -1104,19 +1349,20 @@ test("Protects non-idempotent POST edge cases: 403 no-replay, post-redirect time
       res.end('<div class="infoContentTitle">测试生-20260002</div>');
       return;
     }
-    if (u.pathname === "/jwglxt/xsxk/forbidden_endpoint.html" && req.method === "POST") {
+    if (u.pathname === "/jwglxt/xsxk/zzxkyzbjk_xkBcZyZzxkYzb.html" && req.method === "POST") {
       businessPostCount += 1;
       res.writeHead(403, { "Content-Type": "application/json" });
       res.end('{"msg":"选课轮次未开放"}');
       return;
     }
-    if (u.pathname === "/jwglxt/xsxk/mutate_then_redirect.html" && req.method === "POST") {
+    if (u.pathname === "/jwglxt/xsxk/zzxkyzb_tuikBcZzxkYzb.html" && req.method === "POST") {
       redirectMutateCount += 1;
       res.writeHead(302, { Location: "/jwglxt/xsxk/slow_receipt.html" });
       res.end();
       return;
     }
     if (u.pathname === "/jwglxt/xsxk/slow_receipt.html") {
+      receiptCount += 1;
       setTimeout(() => {
         if (!res.destroyed && !res.writableEnded) {
           res.writeHead(200);
@@ -1143,7 +1389,7 @@ test("Protects non-idempotent POST edge cases: 403 no-replay, post-redirect time
   coldTimeoutEnv.SESSION_VAULT = createDurableObjectHarness(coldTimeoutEnv).namespace;
 
   const coldLoginFailRes = await worker.fetch(
-    new Request("https://worker.example.dev/v1/proxy", {
+    new Request("https://worker.example.dev/v1/selection", {
       method: "POST",
       headers: {
         Authorization: "Bearer edge-key",
@@ -1151,7 +1397,8 @@ test("Protects non-idempotent POST edge cases: 403 no-replay, post-redirect time
       },
       body: JSON.stringify({
         method: "POST",
-        url: `${mockPortal.origin}/jwglxt/xsxk/forbidden_endpoint.html`,
+        confirmed: true,
+        url: `${mockPortal.origin}/jwglxt/xsxk/zzxkyzbjk_xkBcZyZzxkYzb.html`,
         bodyBase64: bytesToBase64(new TextEncoder().encode("id=1")),
       }),
     }),
@@ -1175,7 +1422,7 @@ test("Protects non-idempotent POST edge cases: 403 no-replay, post-redirect time
 
   loginPostCount = 0;
   const forbiddenRes = await worker.fetch(
-    new Request("https://worker.example.dev/v1/proxy", {
+    new Request("https://worker.example.dev/v1/selection", {
       method: "POST",
       headers: {
         Authorization: "Bearer edge-key",
@@ -1183,7 +1430,8 @@ test("Protects non-idempotent POST edge cases: 403 no-replay, post-redirect time
       },
       body: JSON.stringify({
         method: "POST",
-        url: `${mockPortal.origin}/jwglxt/xsxk/forbidden_endpoint.html`,
+        confirmed: true,
+        url: `${mockPortal.origin}/jwglxt/xsxk/zzxkyzbjk_xkBcZyZzxkYzb.html`,
         bodyBase64: bytesToBase64(new TextEncoder().encode("id=1")),
       }),
     }),
@@ -1195,9 +1443,9 @@ test("Protects non-idempotent POST edge cases: 403 no-replay, post-redirect time
   assert.equal(loginPostCount, 1, "Initial login only; HTTP 403 must NOT trigger a second re-login");
   assert.equal(businessPostCount, 1, "HTTP 403 POST must NOT be replayed");
 
-  // 3. Business POST that mutated state on hop 0 (302) and timed out on hop 1 (GET) MUST return 504 RESULT_UNKNOWN
+  // 3. An ambiguous write redirect returns RESULT_UNKNOWN before another upstream request
   const postRedirectTimeoutRes = await worker.fetch(
-    new Request("https://worker.example.dev/v1/proxy", {
+    new Request("https://worker.example.dev/v1/selection", {
       method: "POST",
       headers: {
         Authorization: "Bearer edge-key",
@@ -1205,7 +1453,8 @@ test("Protects non-idempotent POST edge cases: 403 no-replay, post-redirect time
       },
       body: JSON.stringify({
         method: "POST",
-        url: `${mockPortal.origin}/jwglxt/xsxk/mutate_then_redirect.html`,
+        confirmed: true,
+        url: `${mockPortal.origin}/jwglxt/xsxk/zzxkyzb_tuikBcZzxkYzb.html`,
         bodyBase64: bytesToBase64(new TextEncoder().encode("jxb_ids=999")),
       }),
     }),
@@ -1214,6 +1463,7 @@ test("Protects non-idempotent POST edge cases: 403 no-replay, post-redirect time
   assert.equal(postRedirectTimeoutRes.status, 504);
   assert.equal((await postRedirectTimeoutRes.json()).status, "RESULT_UNKNOWN");
   assert.equal(redirectMutateCount, 1);
+  assert.equal(receiptCount, 0);
 });
 
 test("Blocks SSRF IPv6/trailing-dot bypasses, HTTPS downgrade, public-suffix supercookies, malformed Base64, and oversized payloads", async () => {
@@ -1330,4 +1580,96 @@ test("Blocks SSRF IPv6/trailing-dot bypasses, HTTPS downgrade, public-suffix sup
   );
   assert.equal(jar.cookieHeaderFor("https://other.edu.cn/"), "");
   assert.equal(jar.cookieHeaderFor("https://pass.qust.edu.cn/"), "VALID_SUB=2");
+});
+
+function loadSsrfVectors() {
+  const fixture = JSON.parse(
+    fs.readFileSync(new URL("../../../test/fixtures/ssrf_reserved_ranges.json", import.meta.url), "utf8"),
+  );
+  const vectors = [];
+  for (const range of fixture.blockedRanges) {
+    for (const address of range.samples) vectors.push({ address, blocked: true, rule: range.cidr });
+  }
+  for (const prefix of fixture.embeddedIpv4Prefixes) {
+    for (const address of prefix.blockedSamples) vectors.push({ address, blocked: true, rule: prefix.prefix });
+    for (const address of prefix.allowedSamples) vectors.push({ address, blocked: false, rule: prefix.prefix });
+  }
+  for (const address of fixture.allowed) vectors.push({ address, blocked: false, rule: "public" });
+  return vectors;
+}
+
+test("Shared workers/session_gateway/src/net_policy.js is the single SSRF / HostPolicy / cookie implementation and keeps session_gateway self-contained", async () => {
+  const shared = await import("../src/net_policy.js");
+  const protocol = await import("../src/protocol.js");
+  const cookieJar = await import("../src/cookie_jar.js");
+
+  // Guard the "Deploy to Cloudflare" subdirectory button: workers/session_gateway/src
+  // must never import files outside workers/session_gateway/.
+  const srcDir = new URL("../src/", import.meta.url);
+  for (const file of fs.readdirSync(srcDir)) {
+    if (!file.endsWith(".js") && !file.endsWith(".mjs")) continue;
+    const text = fs.readFileSync(new URL(file, srcDir), "utf8");
+    const escapingImports = [...text.matchAll(/\bfrom\s+["'](\.\.\/[^"']+)["']/g)].map((m) => m[1]);
+    assert.deepEqual(
+      escapingImports,
+      [],
+      `workers/session_gateway/src/${file} must stay self-contained for subdirectory deploys`,
+    );
+  }
+
+  for (const name of [
+    "PortalProtocolError",
+    "base64ToBytes",
+    "bytesToBase64",
+    "isHostAllowed",
+    "isPrivateOrLoopbackHost",
+    "upgradeSameHostHttpRedirect",
+  ]) {
+    assert.equal(protocol[name], shared[name], `protocol.js re-exports shared ${name}`);
+  }
+  for (const name of [
+    "MAX_COOKIE_PAIR_BYTES",
+    "cookieDomainMatch",
+    "cookiePathMatch",
+    "defaultCookiePath",
+    "isPublicSuffixOrInvalidCookieDomain",
+    "isValidCookieName",
+    "isValidCookieValue",
+    "parseSetCookieLine",
+  ]) {
+    assert.equal(cookieJar[name], shared[name], `cookie_jar.js re-exports shared ${name}`);
+  }
+
+  for (const { address, blocked, rule } of loadSsrfVectors()) {
+    assert.equal(shared.isPrivateOrLoopbackHost(address), blocked, `${address} (${rule})`);
+    if (address.includes(":")) {
+      assert.equal(shared.isPrivateOrLoopbackHost(`[${address}]`), blocked, `[${address}] (${rule})`);
+    }
+  }
+
+  assert.throws(
+    () => shared.base64ToBytes("a"),
+    (err) => err instanceof shared.PortalProtocolError && err.status === "VALIDATION_FAILED",
+  );
+  const big = `big=${"x".repeat(shared.MAX_COOKIE_PAIR_BYTES)}`;
+  assert.equal(shared.parseSetCookieLine(big, "https://jw.example.edu.cn/"), null);
+  assert.equal(shared.parseSetCookieLine("a=1", "not a url"), null);
+});
+
+test("Confirmed selection reports an interrupted response body as RESULT_UNKNOWN", async () => {
+  const { executeWithCookieJar } = await import("../src/protocol.js");
+  const { ServerCookieJar } = await import("../src/cookie_jar.js");
+  const url = "https://portal.example.edu/selection";
+  for (const fail of [() => { throw new TypeError("transport closed"); }, () => (
+    new Response(new ReadableStream({ start(controller) { controller.error(new Error("stream closed")); } }))
+  )]) {
+    let hits = 0;
+    await assert.rejects(executeWithCookieJar({
+      method: "POST", url, uncertainWrite: true, followRedirects: false,
+      policy: { allowedHosts: [new URL(url).origin], requireSecure: true },
+      jar: new ServerCookieJar(),
+      fetchImpl: async () => { hits += 1; return fail(); },
+    }), { status: "RESULT_UNKNOWN" });
+    assert.equal(hits, 1);
+  }
 });

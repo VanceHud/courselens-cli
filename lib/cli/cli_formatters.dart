@@ -168,6 +168,7 @@ class CliFormatters {
         'globalFlags': const <String>[
           '--demo',
           '--json',
+          '--no-cache',
           '--term <term>',
           '--relay <url>',
           '--worker <name|workerUrl>',
@@ -219,6 +220,11 @@ class CliFormatters {
             'command':
                 'worker monitor [status | set [--grades <on|off>] [--exams <on|off>] [--interval <sec>] [--reset-baseline] | check [--kind <all|grades|exams>]]',
             'description': '查看或配置云端成绩/考试定时巡检（默认全部关闭，零干扰懒保活）',
+          },
+          {
+            'command':
+                'worker cache [status | clear [--category <catalog|schedule|grades|exams|progress|enrolled|classrooms|static>]]',
+            'description': '查看有状态 Worker 代理缓存统计与分类 TTL，或清空全量/指定分类缓存',
           },
           {
             'command': 'today [--date YYYY-MM-DD]',
@@ -280,6 +286,7 @@ CourseLens Native CLI (v${CliArgs.cliVersion}) — 高校教务命令行与 AI A
 全局参数 (可在任意位置传入):
   --demo                              离线运行内置脱敏演示夹具（无需网络或本地配置）
   --json                              向 stdout 输出纯净 JSON（诊断与错误输出至 stderr）
+  --no-cache                          跳过有状态 Worker 服务端只读代理缓存，强制回源教务刷新
   --term <term>                       指定学年学期（如 2025-2026-1）
   --relay <url>                       指定无状态 HTTP 转发网关地址
   --worker <name|workerUrl>           指定已保存网关别名或有状态 Cloudflare Worker 地址
@@ -314,6 +321,8 @@ CourseLens Native CLI (v${CliArgs.cliVersion}) — 高校教务命令行与 AI A
                                       配置 Bark/飞书/钉钉/企微/Telegram/通用 JSON 推送通知
   worker monitor [status | set | check]
                                       配置云端成绩/考试巡检开关（默认关闭）或手动执行一次巡检
+  worker cache [status | clear [--category <cat>]]
+                                      查看云端只读代理缓存统计，或清空全量/指定分类缓存
 
 只读教务查询命令:
   today [--date YYYY-MM-DD]           单次聚合日报：教学周、今日与明日课表、近期考试倒计时
@@ -1525,5 +1534,63 @@ CourseLens Native CLI (v${CliArgs.cliVersion}) — 高校教务命令行与 AI A
       ..writeln(describeItem('出分变动巡检', status.grades))
       ..write(describeItem('考场安排巡检', status.exams));
     return buf.toString();
+  }
+
+  static String formatWorkerCacheStats({
+    required bool json,
+    required String workerUrl,
+    required WorkerCacheStats stats,
+  }) {
+    if (json) {
+      return encodeJson(<String, Object?>{
+        'workerUrl': workerUrl,
+        ...stats.toJson(),
+      });
+    }
+
+    final buf = StringBuffer()
+      ..writeln('# 云端 Worker 代理缓存状态')
+      ..writeln('- **Worker 网关**: $workerUrl')
+      ..writeln('- **缓存开关**: ${stats.enabled ? "已开启" : "已关闭"}')
+      ..writeln(
+        '- **活跃条目**: ${stats.entryCount} 条（占用 ${stats.formattedSize}）',
+      )
+      ..writeln(
+        '- **命中统计**: 命中 ${stats.hits} 次（L1 内存 ${stats.l1Hits} · L2 加密 SQLite ${stats.l2Hits}）· 未命中 ${stats.misses} · 穿透 ${stats.bypasses} · 淘汰 ${stats.evictions}',
+      );
+    if (stats.categories.isNotEmpty) {
+      buf
+        ..writeln()
+        ..writeln('| 数据分类 | TTL(秒) | 活跃条目 | 占用字节 |')
+        ..writeln('| --- | --- | --- | --- |');
+      for (final c in stats.categories) {
+        buf.writeln(
+          '| ${_cell(c.category)} | ${c.ttlSec} | ${c.activeEntries} | ${c.bytes} |',
+        );
+      }
+    }
+    return buf.toString().trimRight();
+  }
+
+  static String formatWorkerCacheCleared({
+    required bool json,
+    required String workerUrl,
+    required String category,
+    required int clearedCount,
+  }) {
+    if (json) {
+      return encodeJson(<String, Object?>{
+        'ok': true,
+        'workerUrl': workerUrl,
+        'category': category,
+        'clearedCount': clearedCount,
+      });
+    }
+
+    final scope = category == 'all' ? '全量缓存' : '分类 "$category"';
+    return '# 云端 Worker 代理缓存已清理\n'
+        '- **Worker 网关**: $workerUrl\n'
+        '- **清理范围**: $scope\n'
+        '- **已清除条目**: $clearedCount 条';
   }
 }

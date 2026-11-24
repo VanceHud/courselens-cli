@@ -1043,6 +1043,84 @@ void main() {
       expect(withheldExams[1].location, isEmpty);
       expect(withheldExams[1].seat, isEmpty);
     });
+
+    test('optional sub-score and classroom-filter endpoints fall back on academic errors but rethrow SESSION_EXPIRED', () async {
+      var optionalStatus = 500;
+      final engine = _MockQustEngine((req) {
+        final uri = Uri.parse(req.url);
+        if (uri.path == '/jwglxt/xtgl/index_initMenu.html') {
+          return _htmlResponse(req.url, _fixture('qust-init-menu-v9.html'));
+        }
+        if (uri.path == '/jwglxt/cjcx/cjcx_cxXsgrcj.html') {
+          return _jsonResponse(req.url, _fixture('qust-grades.json'));
+        }
+        if (uri.path == '/jwglxt/cjcx/cjcx_cxXsKccjList.html' ||
+            uri.path == '/jwglxt/cdjy/cdjy_cxKxcdlb.html') {
+          return _htmlResponse(req.url, '', status: optionalStatus);
+        }
+        return _htmlResponse(req.url, 'Not Found', status: 404);
+      });
+
+      final client = AcademicClient(
+        engine: engine,
+        decoder: const _Utf8Decoder(),
+        secureStore: InMemorySecureStore(),
+        clock: () => _qustReconEpoch,
+        random: const _FixedRandom(),
+      );
+      await client.adoptBrowserSession(
+        schoolId: 'qust',
+        accountKey: '2428050113',
+        academicBaseUrl: 'https://jwglxt.qust.edu.cn/jwglxt',
+        cookies: const <StoredCookie>[
+          StoredCookie(
+            name: 'JSESSIONID',
+            value: 'S1',
+            domain: 'jwglxt.qust.edu.cn',
+            path: '/jwglxt',
+            secure: true,
+          ),
+        ],
+      );
+
+      final report = await client.loadStudyGrades(
+        schoolId: 'qust',
+        accountKey: '2428050113',
+        systemId: 'zf',
+      );
+      expect(report.grades, isNotEmpty);
+      expect(report.grades.every((g) => g.subItems.isEmpty), isTrue);
+
+      final filters = await client.fetchEmptyClassroomFilters(
+        schoolId: 'qust',
+        accountKey: '2428050113',
+      );
+      expect(filters.isEmpty, isTrue);
+
+      optionalStatus = 901;
+      final sessionExpired = throwsA(
+        isA<AcademicException>().having(
+          (e) => e.status,
+          'status',
+          AcademicStatus.SESSION_EXPIRED,
+        ),
+      );
+      await expectLater(
+        client.loadStudyGrades(
+          schoolId: 'qust',
+          accountKey: '2428050113',
+          systemId: 'zf',
+        ),
+        sessionExpired,
+      );
+      await expectLater(
+        client.fetchEmptyClassroomFilters(
+          schoolId: 'qust',
+          accountKey: '2428050113',
+        ),
+        sessionExpired,
+      );
+    });
   });
 
   group('6. Three Year-Round QUST Modules: N105515 Academic Progress, N2155 Empty Classrooms, N255010 Enrolled Courses', () {

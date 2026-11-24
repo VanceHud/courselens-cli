@@ -1,12 +1,13 @@
 import 'dart:async';
 import 'dart:convert' hide Base64Codec;
-import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
 import '../../core/courselens_core.dart';
+import 'gateway_response_decoder.dart';
 import 'http_policy_provider.dart';
 import 'relay_http_engine.dart';
+import 'uncertain_write.dart';
 import 'worker_gateway_models.dart';
 
 export 'worker_gateway_models.dart';
@@ -21,7 +22,7 @@ class WorkerRemoteSessionInfo {
     required this.schoolName,
     required this.baseUrl,
     this.casBaseUrl = '',
-    required this.systemId,
+    required this.system,
     required this.allowedHosts,
     required this.requireSecure,
     this.hasPasswordAuth = false,
@@ -47,7 +48,7 @@ class WorkerRemoteSessionInfo {
   final String schoolName;
   final String baseUrl;
   final String casBaseUrl;
-  final String systemId;
+  final AcademicSystem system;
   final List<String> allowedHosts;
   final bool requireSecure;
   final bool hasPasswordAuth;
@@ -109,7 +110,7 @@ class WorkerRemoteSessionInfo {
       schoolName: (json['schoolName'] as String? ?? '').trim(),
       baseUrl: (json['baseUrl'] as String? ?? '').trim(),
       casBaseUrl: (json['casBaseUrl'] as String? ?? '').trim(),
-      systemId: (json['systemId'] as String? ?? 'ZF').trim(),
+      system: AcademicSystem.fromIdOrAuto(json['systemId'] as String?),
       allowedHosts: List<String>.unmodifiable(hosts),
       requireSecure: json['requireSecure'] != false,
       hasPasswordAuth: json['hasPasswordAuth'] == true,
@@ -142,8 +143,8 @@ class WorkerRemoteSessionInfo {
 ///
 /// 与无状态 [RelayHttpEngine] 不同：
 /// - 教务账号密码与原始 `CookieJar` 完全驻留在用户自建的 Cloudflare Durable Object 中；
-/// - 五端 App 与原生 CLI 仅凭 `Worker URL + API Key` 发起请求，本地零密码、零原始 Cookie；
-/// - 服务端遇到 HTTP `901` / 登录重定向会自动单飞重登并重放请求；
+/// - 原生 CLI 仅凭 `Worker URL + API Key` 发起请求，本地零密码、零原始 Cookie；
+/// - 服务端遇到 HTTP `901` / 登录重定向会自动单飞重登并重放只读查询；
 /// - 严格遵守红线 #3（`POST` 超时映射为 `RESULT_UNKNOWN` 绝不盲目重试）与红线 #4（`HostPolicy` 白名单校验）。
 class WorkerSessionHttpEngine implements HttpEngine {
   WorkerSessionHttpEngine({
@@ -151,7 +152,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String Function() apiKeyProvider,
     HttpPolicyProvider? policyProvider,
     http.Client? client,
-    this.timeout = const Duration(seconds: 25),
+    this.timeout = _upstreamCallTimeout,
   })  : _workerBaseUrlProvider = workerBaseUrlProvider,
         _apiKeyProvider = apiKeyProvider,
         _policyProvider = policyProvider,
@@ -162,6 +163,25 @@ class WorkerSessionHttpEngine implements HttpEngine {
   final HttpPolicyProvider? _policyProvider;
   final http.Client _client;
   final Duration timeout;
+
+  // 客户端超时预算，需与网关上游超时（`session_vault.js` `_timeoutMs()` /
+  // `protocol.js` `timeoutMs`，默认 22s，即 `UPSTREAM_TIMEOUT`）保持一致：
+  // 触及教务上游的调用必须长于 22s，否则网关尚未返回时客户端已超时，
+  // `POST` 会被映射为 `RESULT_UNKNOWN`（红线 #3）。调整网关一侧时请同步复核这里。
+
+  /// `GET /health` 在线探测，不触及上游。
+  static const Duration _healthProbeTimeout = Duration(seconds: 5);
+
+  /// 轻量控制调用（删除远端会话、Webhook 配置/测试、缓存管理），不经过教务上游。
+  static const Duration _controlCallTimeout = Duration(seconds: 15);
+
+  /// 读写 Durable Object 中的云端任务与监控配置等状态。
+  static const Duration _stateCallTimeout = Duration(seconds: 20);
+
+  /// 可能触及教务上游的调用（代理请求、会话激活/刷新、Cookie 推送、
+  /// 立即执行任务、监控检查）：网关 22s 上游超时 + 3s 余量。
+  /// 注意：服务端自动重登并重放时总耗时仍可能超过该预算。
+  static const Duration _upstreamCallTimeout = Duration(seconds: 25);
 
   static const Set<String> _strippedClientHeaders = <String>{
     'cookie',
@@ -214,11 +234,13 @@ class WorkerSessionHttpEngine implements HttpEngine {
       '/v1/session/refresh',
       '/v1/session',
       '/v1/proxy',
+      '/v1/selection',
       '/v1/tasks',
       '/v1/webhook/test',
       '/v1/webhook',
       '/v1/monitor/check',
       '/v1/monitor',
+      '/v1/cache',
       '/v1',
       '/health',
     ];
@@ -256,7 +278,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
   static Future<RelayHealthStatus> probeUrl(
     String workerBaseUrl, {
     http.Client? client,
-    Duration timeout = const Duration(seconds: 5),
+    Duration timeout = _healthProbeTimeout,
   }) async {
     final String normalized;
     try {
@@ -369,7 +391,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String apiKey,
     bool offline = false,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 25),
+    Duration timeout = _upstreamCallTimeout,
   }) async {
     final decoded = await _callControlJson(
       workerBaseUrl: workerBaseUrl,
@@ -387,7 +409,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String workerBaseUrl,
     required String apiKey,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 25),
+    Duration timeout = _upstreamCallTimeout,
   }) async {
     final decoded = await _callControlJson(
       workerBaseUrl: workerBaseUrl,
@@ -410,7 +432,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     String? username,
     int? keepaliveIntervalSec,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 25),
+    Duration timeout = _upstreamCallTimeout,
   }) async {
     final decoded = await _callControlJson(
       workerBaseUrl: workerBaseUrl,
@@ -438,7 +460,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String workerBaseUrl,
     required String apiKey,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 15),
+    Duration timeout = _controlCallTimeout,
   }) async {
     await _callControlJson(
       workerBaseUrl: workerBaseUrl,
@@ -458,7 +480,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String workerBaseUrl,
     required String apiKey,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 20),
+    Duration timeout = _stateCallTimeout,
   }) async {
     final decoded = await _callControlJson(
       workerBaseUrl: workerBaseUrl,
@@ -476,7 +498,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String apiKey,
     required String taskId,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 20),
+    Duration timeout = _stateCallTimeout,
   }) async {
     final cleanId = taskId.trim();
     if (cleanId.isEmpty) {
@@ -502,7 +524,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String taskId,
     required Map<String, Object?> patch,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 20),
+    Duration timeout = _stateCallTimeout,
   }) async {
     final cleanId = taskId.trim();
     if (cleanId.isEmpty) {
@@ -529,7 +551,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String taskId,
     bool confirmed = false,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 25),
+    Duration timeout = _upstreamCallTimeout,
   }) async {
     final cleanId = taskId.trim();
     if (cleanId.isEmpty) {
@@ -557,7 +579,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String apiKey,
     required String taskId,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 20),
+    Duration timeout = _stateCallTimeout,
   }) async {
     final cleanId = taskId.trim();
     if (cleanId.isEmpty) {
@@ -584,7 +606,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String workerBaseUrl,
     required String apiKey,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 15),
+    Duration timeout = _controlCallTimeout,
   }) async {
     final decoded = await _callControlJson(
       workerBaseUrl: workerBaseUrl,
@@ -602,7 +624,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String apiKey,
     required Map<String, Object?> payload,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 15),
+    Duration timeout = _controlCallTimeout,
   }) async {
     final decoded = await _callControlJson(
       workerBaseUrl: workerBaseUrl,
@@ -620,7 +642,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String workerBaseUrl,
     required String apiKey,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 15),
+    Duration timeout = _controlCallTimeout,
   }) async {
     final decoded = await _callControlJson(
       workerBaseUrl: workerBaseUrl,
@@ -637,7 +659,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String workerBaseUrl,
     required String apiKey,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 15),
+    Duration timeout = _controlCallTimeout,
   }) async {
     final decoded = await _callControlJson(
       workerBaseUrl: workerBaseUrl,
@@ -654,7 +676,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String workerBaseUrl,
     required String apiKey,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 20),
+    Duration timeout = _stateCallTimeout,
   }) async {
     final decoded = await _callControlJson(
       workerBaseUrl: workerBaseUrl,
@@ -672,7 +694,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String apiKey,
     required Map<String, Object?> payload,
     http.Client? client,
-    Duration timeout = const Duration(seconds: 20),
+    Duration timeout = _stateCallTimeout,
   }) async {
     final decoded = await _callControlJson(
       workerBaseUrl: workerBaseUrl,
@@ -691,7 +713,7 @@ class WorkerSessionHttpEngine implements HttpEngine {
     required String apiKey,
     String kind = 'all',
     http.Client? client,
-    Duration timeout = const Duration(seconds: 25),
+    Duration timeout = _upstreamCallTimeout,
   }) async {
     final decoded = await _callControlJson(
       workerBaseUrl: workerBaseUrl,
@@ -703,6 +725,51 @@ class WorkerSessionHttpEngine implements HttpEngine {
       timeout: timeout,
     );
     return WorkerMonitorStatus.fromJson(decoded);
+  }
+
+  // ---------------------------------------------------------------------------
+  // 代理缓存管理 API (/v1/cache)
+  // ---------------------------------------------------------------------------
+
+  /// 读取有状态 Worker 代理缓存统计与分类 TTL 概览（`GET /v1/cache`）。
+  static Future<WorkerCacheStats> fetchCacheStats({
+    required String workerBaseUrl,
+    required String apiKey,
+    http.Client? client,
+    Duration timeout = _controlCallTimeout,
+  }) async {
+    final decoded = await _callControlJson(
+      workerBaseUrl: workerBaseUrl,
+      apiKey: apiKey,
+      method: 'GET',
+      subPath: '/v1/cache',
+      client: client,
+      timeout: timeout,
+    );
+    return WorkerCacheStats.fromJson(decoded);
+  }
+
+  /// 清空有状态 Worker 全量或指定分类的代理响应缓存（`DELETE /v1/cache`）。
+  static Future<int> clearRemoteCache({
+    required String workerBaseUrl,
+    required String apiKey,
+    String? category,
+    http.Client? client,
+    Duration timeout = _controlCallTimeout,
+  }) async {
+    final cleanCategory = category?.trim() ?? '';
+    final subPath = cleanCategory.isEmpty
+        ? '/v1/cache'
+        : '/v1/cache?category=${Uri.encodeQueryComponent(cleanCategory)}';
+    final decoded = await _callControlJson(
+      workerBaseUrl: workerBaseUrl,
+      apiKey: apiKey,
+      method: 'DELETE',
+      subPath: subPath,
+      client: client,
+      timeout: timeout,
+    );
+    return (decoded['clearedCount'] as num?)?.toInt() ?? 0;
   }
 
   static Future<Map<String, dynamic>> _callControlJson({
@@ -747,44 +814,28 @@ class WorkerSessionHttpEngine implements HttpEngine {
         if (body != null) 'Content-Type': 'application/json',
       };
       final encodedBody = body != null ? jsonEncode(body) : null;
-      final http.Response raw;
-      switch (method.toUpperCase()) {
-        case 'POST':
-          raw = await activeClient
-              .post(uri, headers: headers, body: encodedBody)
-              .timeout(timeout);
-        case 'PUT':
-          raw = await activeClient
-              .put(uri, headers: headers, body: encodedBody)
-              .timeout(timeout);
-        case 'PATCH':
-          raw = await activeClient
-              .patch(uri, headers: headers, body: encodedBody)
-              .timeout(timeout);
-        case 'DELETE':
-          raw = await activeClient
-              .delete(uri, headers: headers, body: encodedBody)
-              .timeout(timeout);
-        default:
-          raw = await activeClient.get(uri, headers: headers).timeout(timeout);
-      }
-      final decoded = _decodeJsonMap(raw);
-      if (raw.statusCode >= 400) {
-        throw _mapGatewayError(raw.statusCode, decoded);
-      }
-      return decoded;
+      final request = http.Request(method.toUpperCase(), uri)
+        ..followRedirects = false
+        ..headers.addAll(headers);
+      if (encodedBody != null) request.body = encodedBody;
+      final raw = await activeClient
+          .send(request)
+          .then(http.Response.fromStream)
+          .timeout(timeout);
+      return _gatewayDecoder.decodeOrThrow(
+        raw,
+        mayHaveCommitted: writeMayHaveCommitted,
+      );
     } on AcademicException {
       rethrow;
     } on TimeoutException {
       throw AcademicException(
-        writeMayHaveCommitted
-            ? AcademicStatus.RESULT_UNKNOWN
-            : AcademicStatus.NETWORK_RETRYABLE,
+        uncertainWriteStatus(mayHaveCommitted: writeMayHaveCommitted),
         '连接有状态 Worker 接口超时，请检查 Worker 或教务站是否在线',
       );
     } catch (error) {
       throw AcademicException(
-        AcademicStatus.NETWORK_RETRYABLE,
+        uncertainWriteStatus(mayHaveCommitted: writeMayHaveCommitted),
         '无法连接有状态 Worker：$error',
       );
     } finally {
@@ -858,127 +909,66 @@ class WorkerSessionHttpEngine implements HttpEngine {
       sanitizedHeaders[entry.key] = entry.value;
     }
 
-    final endpoint = '$workerBase/v1/proxy';
+    final endpoint = request.confirmedSelection
+        ? '$workerBase/v1/selection'
+        : '$workerBase/v1/proxy';
     final payload = <String, Object?>{
+      if (request.confirmedSelection) 'confirmed': true,
       'method': request.method.wireName,
       'url': request.url,
       'headers': sanitizedHeaders,
       if (request.body != null && request.body!.isNotEmpty)
         'bodyBase64': Base64Codec.encode(request.body!),
       'followRedirects': request.followRedirects,
+      if (HttpCacheScope.isBypassCache) 'bypassCache': true,
     };
 
+    final writeMayHaveCommitted = request.method == HttpMethod.post;
     final http.Response raw;
     try {
+      final forward = http.Request('POST', Uri.parse(endpoint))
+        ..followRedirects = false
+        ..headers.addAll(<String, String>{
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $apiKey',
+        })
+        ..body = jsonEncode(payload);
       raw = await _client
-          .post(
-            Uri.parse(endpoint),
-            headers: <String, String>{
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $apiKey',
-            },
-            body: jsonEncode(payload),
-          )
+          .send(forward)
+          .then(http.Response.fromStream)
           .timeout(timeout);
     } on TimeoutException {
       // Security Redline #3: Never mask an in-flight POST timeout.
-      final status = request.method == HttpMethod.post
-          ? AcademicStatus.RESULT_UNKNOWN
-          : AcademicStatus.NETWORK_RETRYABLE;
       throw AcademicException(
-        status,
+        uncertainWriteStatus(mayHaveCommitted: writeMayHaveCommitted),
         '连接有状态 Worker 网关超时，请检查网关或教务上游状态',
       );
     } catch (error) {
       throw AcademicException(
-        AcademicStatus.NETWORK_RETRYABLE,
+        uncertainWriteStatus(mayHaveCommitted: writeMayHaveCommitted),
         '无法连接有状态 Worker 网关：$error',
       );
     }
 
-    final decoded = _decodeJsonMap(raw);
-    if (raw.statusCode >= 400) {
-      throw _mapGatewayError(raw.statusCode, decoded);
-    }
-
-    final status = (decoded['status'] as num?)?.toInt() ?? raw.statusCode;
-    final finalUrl = decoded['finalUrl'] as String? ?? request.url;
-    final headers = <String, List<String>>{};
-    final rawHeaders = decoded['headers'];
-    if (rawHeaders is Map) {
-      for (final entry in rawHeaders.entries) {
-        final key = entry.key.toString();
-        if (key.toLowerCase() == 'set-cookie') continue;
-        final val = entry.value;
-        if (val is List) {
-          headers[key] = val.map((e) => e.toString()).toList();
-        } else if (val != null) {
-          headers[key] = <String>[val.toString()];
-        }
-      }
-    }
-
-    final bodyB64 = decoded['bodyBase64'] as String? ?? '';
-    final bodyBytes = bodyB64.isEmpty
-        ? Uint8List(0)
-        : (Base64Codec.decode(bodyB64) ?? Uint8List(0));
+    final decoded = _gatewayDecoder.decodeOrThrow(
+      raw,
+      mayHaveCommitted: writeMayHaveCommitted,
+    );
 
     return HttpResponse(
-      status: status,
-      finalUrl: finalUrl,
-      headers: headers,
-      body: bodyBytes,
+      status: (decoded['status'] as num?)?.toInt() ?? raw.statusCode,
+      finalUrl: decoded['finalUrl'] as String? ?? request.url,
+      headers: GatewayResponseDecoder.parseHeaders(
+        decoded['headers'],
+        skipSetCookie: true,
+      ),
+      body: GatewayResponseDecoder.decodeBody(decoded['bodyBase64']),
       cookies: const <StoredCookie>[],
     );
   }
 
-  static Map<String, dynamic> _decodeJsonMap(http.Response raw) {
-    try {
-      final parsed = jsonDecode(utf8.decode(raw.bodyBytes));
-      if (parsed is Map) {
-        return Map<String, dynamic>.from(parsed);
-      }
-    } catch (_) {
-      // Handled below.
-    }
-    throw AcademicException(
-      AcademicStatus.NETWORK_RETRYABLE,
-      '有状态 Worker 返回了非预期响应（HTTP ${raw.statusCode}）',
-    );
-  }
-
-  static AcademicException _mapGatewayError(
-    int httpStatus,
-    Map<String, dynamic> decoded,
-  ) {
-    final code = (decoded['status'] as String? ?? '').trim();
-    final message = (decoded['error'] as String? ?? '').trim().isNotEmpty
-        ? (decoded['error'] as String).trim()
-        : 'Worker 请求失败（HTTP $httpStatus）';
-
-    if (httpStatus == 401 && code.isEmpty) {
-      return AcademicException(AcademicStatus.INVALID_CREDENTIALS, message);
-    }
-
-    final mapped = switch (code) {
-      'UNAUTHORIZED' ||
-      'INVALID_API_KEY' ||
-      'INVALID_CREDENTIALS' =>
-        AcademicStatus.INVALID_CREDENTIALS,
-      'SESSION_EXPIRED' => AcademicStatus.SESSION_EXPIRED,
-      'CAPTCHA_REQUIRED' => AcademicStatus.CAPTCHA_REQUIRED,
-      'UNTRUSTED_URL' || 'FORBIDDEN_ORIGIN' => AcademicStatus.UNTRUSTED_URL,
-      'RESULT_UNKNOWN' => AcademicStatus.RESULT_UNKNOWN,
-      'CONFIG_ERROR' ||
-      'VALIDATION_FAILED' ||
-      'PAYLOAD_TOO_LARGE' ||
-      'NOT_FOUND' =>
-        AcademicStatus.VALIDATION_FAILED,
-      'WEBHOOK_FAILED' => AcademicStatus.NETWORK_RETRYABLE,
-      _ => httpStatus == 401
-          ? AcademicStatus.INVALID_CREDENTIALS
-          : AcademicStatus.NETWORK_RETRYABLE,
-    };
-    return AcademicException(mapped, message);
-  }
+  static const GatewayResponseDecoder _gatewayDecoder = GatewayResponseDecoder(
+    unexpectedResponsePrefix: '有状态 Worker 返回了非预期响应',
+    requestFailedPrefix: 'Worker 请求失败',
+  );
 }

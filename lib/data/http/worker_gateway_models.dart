@@ -1,4 +1,3 @@
-
 /// 已保存的有状态 Cloudflare Worker 网关元数据（不含明文 API Key）。
 class SavedWorkerGateway {
   const SavedWorkerGateway({
@@ -104,18 +103,18 @@ class SavedWorkerGateway {
       };
 
   factory SavedWorkerGateway.fromJson(Map<String, dynamic> json) {
-    final workerUrl = (json['workerUrl'] as String? ?? '').trim();
-    final rawId = (json['id'] as String? ?? '').trim();
+    final workerUrl = _str(json, 'workerUrl');
+    final rawId = _str(json, 'id');
     return SavedWorkerGateway(
       id: rawId.isNotEmpty ? rawId : deriveId(workerUrl),
       workerUrl: workerUrl,
-      label: (json['label'] as String? ?? '').trim(),
-      schoolId: (json['schoolId'] as String? ?? '').trim(),
-      schoolName: (json['schoolName'] as String? ?? '').trim(),
-      accountKey: (json['accountKey'] as String? ?? '').trim(),
-      studentName: (json['studentName'] as String? ?? '').trim(),
-      keyHint: (json['keyHint'] as String? ?? '').trim(),
-      updatedAtEpochMs: (json['updatedAtEpochMs'] as num?)?.toInt() ?? 0,
+      label: _str(json, 'label'),
+      schoolId: _str(json, 'schoolId'),
+      schoolName: _str(json, 'schoolName'),
+      accountKey: _str(json, 'accountKey'),
+      studentName: _str(json, 'studentName'),
+      keyHint: _str(json, 'keyHint'),
+      updatedAtEpochMs: _int(json, 'updatedAtEpochMs'),
     );
   }
 }
@@ -155,14 +154,14 @@ class CloudTaskLogEntry {
 
   factory CloudTaskLogEntry.fromJson(Map<String, dynamic> json) =>
       CloudTaskLogEntry(
-        atMs: (json['atMs'] as num?)?.toInt(),
-        at: json['at'] as String?,
-        status: (json['status'] as String? ?? 'INFO').trim(),
-        durationMs: (json['durationMs'] as num?)?.toInt(),
-        message: (json['message'] as String? ?? '').trim(),
-        taskId: (json['taskId'] as String? ?? '').trim(),
-        taskName: (json['taskName'] as String? ?? '').trim(),
-        targetId: (json['targetId'] as String? ?? '').trim(),
+        atMs: _intOrNull(json, 'atMs'),
+        at: _strOrNull(json, 'at'),
+        status: _str(json, 'status', 'INFO'),
+        durationMs: _intOrNull(json, 'durationMs'),
+        message: _str(json, 'message'),
+        taskId: _str(json, 'taskId'),
+        taskName: _str(json, 'taskName'),
+        targetId: _str(json, 'targetId'),
       );
 }
 
@@ -196,11 +195,11 @@ class CloudTaskMetrics {
   factory CloudTaskMetrics.fromJson(Map<String, dynamic> json) =>
       CloudTaskMetrics(
         baselineInitialized: json['baselineInitialized'] == true,
-        trackedItemCount: (json['trackedItemCount'] as num?)?.toInt() ?? 0,
-        totalRuns: (json['totalRuns'] as num?)?.toInt() ?? 0,
-        changeCount: (json['changeCount'] as num?)?.toInt() ?? 0,
-        lastDurationMs: (json['lastDurationMs'] as num?)?.toInt(),
-        lastError: (json['lastError'] as String? ?? '').trim(),
+        trackedItemCount: _int(json, 'trackedItemCount'),
+        totalRuns: _int(json, 'totalRuns'),
+        changeCount: _int(json, 'changeCount'),
+        lastDurationMs: _intOrNull(json, 'lastDurationMs'),
+        lastError: _str(json, 'lastError'),
       );
 }
 
@@ -235,7 +234,10 @@ class WorkerMonitorChangeItem {
   final String seat;
 
   bool get isExamChange =>
-      time.isNotEmpty || location.isNotEmpty || seat.isNotEmpty || examName.isNotEmpty;
+      time.isNotEmpty ||
+      location.isNotEmpty ||
+      seat.isNotEmpty ||
+      examName.isNotEmpty;
 
   String get summaryLine {
     if (isExamChange) {
@@ -276,18 +278,18 @@ class WorkerMonitorChangeItem {
 
   factory WorkerMonitorChangeItem.fromJson(Map<String, dynamic> json) =>
       WorkerMonitorChangeItem(
-        changeType: (json['changeType'] as String? ?? 'ADDED').trim(),
-        detectedAt: json['detectedAt'] as String?,
-        term: (json['term'] as String? ?? '').trim(),
-        courseCode: (json['courseCode'] as String? ?? '').trim(),
-        courseName: (json['courseName'] as String? ?? '').trim(),
-        score: (json['score'] as String? ?? '').trim(),
-        gpa: (json['gpa'] as String? ?? '').trim(),
-        credit: (json['credit'] as String? ?? '').trim(),
-        examName: (json['examName'] as String? ?? '').trim(),
-        time: (json['time'] as String? ?? '').trim(),
-        location: (json['location'] as String? ?? '').trim(),
-        seat: (json['seat'] as String? ?? '').trim(),
+        changeType: _str(json, 'changeType', 'ADDED'),
+        detectedAt: _strOrNull(json, 'detectedAt'),
+        term: _str(json, 'term'),
+        courseCode: _str(json, 'courseCode'),
+        courseName: _str(json, 'courseName'),
+        score: _str(json, 'score'),
+        gpa: _str(json, 'gpa'),
+        credit: _str(json, 'credit'),
+        examName: _str(json, 'examName'),
+        time: _str(json, 'time'),
+        location: _str(json, 'location'),
+        seat: _str(json, 'seat'),
       );
 }
 
@@ -361,23 +363,23 @@ class CloudTaskSummary {
 
   factory CloudTaskSummary.fromJson(Map<String, dynamic> json) =>
       CloudTaskSummary(
-        taskId: (json['taskId'] as String? ?? '').trim(),
-        rawId: (json['rawId'] as String? ?? '').trim(),
-        type: (json['type'] as String? ?? '').trim(),
-        title: (json['title'] as String? ?? '').trim(),
-        subtitle: (json['subtitle'] as String? ?? '').trim(),
+        taskId: _str(json, 'taskId'),
+        rawId: _str(json, 'rawId'),
+        type: _str(json, 'type'),
+        title: _str(json, 'title'),
+        subtitle: _str(json, 'subtitle'),
         enabled: json['enabled'] == true,
         canToggleDirectly: json['canToggleDirectly'] != false,
         requiresWriteConfirmToRun: json['requiresWriteConfirmToRun'] == true,
-        status: (json['status'] as String? ?? 'DISABLED').trim(),
-        intervalSec: (json['intervalSec'] as num?)?.toInt() ?? 0,
-        mode: (json['mode'] as String? ?? 'PERIODIC').trim(),
-        startAtEpochSeconds: (json['startAtEpochSeconds'] as num?)?.toInt(),
-        lastRunAt: json['lastRunAt'] as String?,
-        nextWakeAt: json['nextWakeAt'] as String?,
-        lastSummary: (json['lastSummary'] as String? ?? '').trim(),
-        trackedItemCount: (json['trackedItemCount'] as num?)?.toInt() ?? 0,
-        changeCount: (json['changeCount'] as num?)?.toInt() ?? 0,
+        status: _str(json, 'status', 'DISABLED'),
+        intervalSec: _int(json, 'intervalSec'),
+        mode: _str(json, 'mode', 'PERIODIC'),
+        startAtEpochSeconds: _intOrNull(json, 'startAtEpochSeconds'),
+        lastRunAt: _strOrNull(json, 'lastRunAt'),
+        nextWakeAt: _strOrNull(json, 'nextWakeAt'),
+        lastSummary: _str(json, 'lastSummary'),
+        trackedItemCount: _int(json, 'trackedItemCount'),
+        changeCount: _int(json, 'changeCount'),
       );
 }
 
@@ -413,9 +415,9 @@ class CloudTaskSessionInfo {
         authenticated: json['authenticated'] == true,
         hasPasswordAuth: json['hasPasswordAuth'] == true,
         lazyKeepaliveActive: json['lazyKeepaliveActive'] == true,
-        cookieCount: (json['cookieCount'] as num?)?.toInt() ?? 0,
-        username: (json['username'] as String? ?? '').trim(),
-        lastVerifiedAt: json['lastVerifiedAt'] as String?,
+        cookieCount: _int(json, 'cookieCount'),
+        username: _str(json, 'username'),
+        lastVerifiedAt: _strOrNull(json, 'lastVerifiedAt'),
       );
 }
 
@@ -460,20 +462,9 @@ class CloudTaskDetail {
     final sessionInfo = rawSession is Map
         ? CloudTaskSessionInfo.fromJson(Map<String, dynamic>.from(rawSession))
         : null;
-    final rawChanges = json['recentChanges'];
-    final recentChanges = rawChanges is List
-        ? rawChanges
-            .whereType<Map<dynamic, dynamic>>()
-            .map((m) => WorkerMonitorChangeItem.fromJson(Map<String, dynamic>.from(m)))
-            .toList(growable: false)
-        : const <WorkerMonitorChangeItem>[];
-    final rawLogs = json['logs'];
-    final logs = rawLogs is List
-        ? rawLogs
-            .whereType<Map<dynamic, dynamic>>()
-            .map((m) => CloudTaskLogEntry.fromJson(Map<String, dynamic>.from(m)))
-            .toList(growable: false)
-        : const <CloudTaskLogEntry>[];
+    final recentChanges =
+        _parseList(json['recentChanges'], WorkerMonitorChangeItem.fromJson);
+    final logs = _parseList(json['logs'], CloudTaskLogEntry.fromJson);
 
     return CloudTaskDetail(
       summary: summary,
@@ -526,20 +517,14 @@ class CloudTaskListSnapshot {
       };
 
   factory CloudTaskListSnapshot.fromJson(Map<String, dynamic> json) {
-    final rawTasks = json['tasks'];
-    final tasks = rawTasks is List
-        ? rawTasks
-            .whereType<Map<dynamic, dynamic>>()
-            .map((m) => CloudTaskSummary.fromJson(Map<String, dynamic>.from(m)))
-            .toList(growable: false)
-        : const <CloudTaskSummary>[];
+    final tasks = _parseList(json['tasks'], CloudTaskSummary.fromJson);
     return CloudTaskListSnapshot(
       ok: json['ok'] != false,
       lazyKeepaliveActive: json['lazyKeepaliveActive'] == true,
       hasPasswordAuth: json['hasPasswordAuth'] == true,
       webhookConfigured: json['webhookConfigured'] == true,
-      activeTaskCount: (json['activeTaskCount'] as num?)?.toInt() ?? 0,
-      nextAlarmAt: json['nextAlarmAt'] as String?,
+      activeTaskCount: _int(json, 'activeTaskCount'),
+      nextAlarmAt: _strOrNull(json, 'nextAlarmAt'),
       tasks: tasks,
     );
   }
@@ -594,17 +579,16 @@ class WorkerWebhookConfig {
       WorkerWebhookConfig(
         configured: json['configured'] == true,
         enabled: json['enabled'] == true,
-        provider: (json['provider'] as String? ?? 'auto').trim(),
-        resolvedProvider:
-            (json['resolvedProvider'] as String? ?? 'generic').trim(),
-        maskedUrl: (json['maskedUrl'] as String? ?? '').trim(),
+        provider: _str(json, 'provider', 'auto'),
+        resolvedProvider: _str(json, 'resolvedProvider', 'generic'),
+        maskedUrl: _str(json, 'maskedUrl'),
         hasSecret: json['hasSecret'] == true,
-        telegramChatId: (json['telegramChatId'] as String? ?? '').trim(),
+        telegramChatId: _str(json, 'telegramChatId'),
         onGradeChange: json['onGradeChange'] != false,
         onExamChange: json['onExamChange'] != false,
-        updatedAt: json['updatedAt'] as String?,
-        lastSentAt: json['lastSentAt'] as String?,
-        lastError: (json['lastError'] as String? ?? '').trim(),
+        updatedAt: _strOrNull(json, 'updatedAt'),
+        lastSentAt: _strOrNull(json, 'lastSentAt'),
+        lastError: _str(json, 'lastError'),
       );
 }
 
@@ -663,36 +647,24 @@ class WorkerSingleMonitorView {
       };
 
   factory WorkerSingleMonitorView.fromJson(Map<String, dynamic> json) {
-    final kind = (json['kind'] as String? ?? 'grades').trim();
-    final rawChanges = json['recentChanges'];
-    final changes = rawChanges is List
-        ? rawChanges
-            .whereType<Map<dynamic, dynamic>>()
-            .map((m) => WorkerMonitorChangeItem.fromJson(Map<String, dynamic>.from(m)))
-            .toList(growable: false)
-        : const <WorkerMonitorChangeItem>[];
-    final rawLogs = json['logs'];
-    final logs = rawLogs is List
-        ? rawLogs
-            .whereType<Map<dynamic, dynamic>>()
-            .map((m) => CloudTaskLogEntry.fromJson(Map<String, dynamic>.from(m)))
-            .toList(growable: false)
-        : const <CloudTaskLogEntry>[];
+    final kind = _str(json, 'kind', 'grades');
+    final changes =
+        _parseList(json['recentChanges'], WorkerMonitorChangeItem.fromJson);
+    final logs = _parseList(json['logs'], CloudTaskLogEntry.fromJson);
     return WorkerSingleMonitorView(
-      taskId: (json['taskId'] as String? ?? 'monitor:$kind').trim(),
+      taskId: _str(json, 'taskId', 'monitor:$kind'),
       kind: kind,
       enabled: json['enabled'] == true,
-      intervalSec: (json['intervalSec'] as num?)?.toInt() ??
-          (kind == 'exams' ? 3600 : 1800),
+      intervalSec: _int(json, 'intervalSec', kind == 'exams' ? 3600 : 1800),
       baselineInitialized: json['baselineInitialized'] == true,
-      trackedItemCount: (json['trackedItemCount'] as num?)?.toInt() ?? 0,
-      totalRuns: (json['totalRuns'] as num?)?.toInt() ?? 0,
-      changeCount: (json['changeCount'] as num?)?.toInt() ?? 0,
-      lastDurationMs: (json['lastDurationMs'] as num?)?.toInt(),
-      lastRunAt: json['lastRunAt'] as String?,
-      nextWakeAt: json['nextWakeAt'] as String?,
-      lastError: (json['lastError'] as String? ?? '').trim(),
-      lastSummary: (json['lastSummary'] as String? ?? '未开启（默认关闭）').trim(),
+      trackedItemCount: _int(json, 'trackedItemCount'),
+      totalRuns: _int(json, 'totalRuns'),
+      changeCount: _int(json, 'changeCount'),
+      lastDurationMs: _intOrNull(json, 'lastDurationMs'),
+      lastRunAt: _strOrNull(json, 'lastRunAt'),
+      nextWakeAt: _strOrNull(json, 'nextWakeAt'),
+      lastError: _str(json, 'lastError'),
+      lastSummary: _str(json, 'lastSummary', '未开启（默认关闭）'),
       recentChanges: changes,
       logs: logs,
     );
@@ -723,7 +695,9 @@ class WorkerMonitorStatus {
     return WorkerMonitorStatus(
       ok: json['ok'] != false,
       grades: rawGrades is Map
-          ? WorkerSingleMonitorView.fromJson(Map<String, dynamic>.from(rawGrades))
+          ? WorkerSingleMonitorView.fromJson(
+              Map<String, dynamic>.from(rawGrades),
+            )
           : const WorkerSingleMonitorView(
               taskId: 'monitor:grades',
               kind: 'grades',
@@ -740,3 +714,145 @@ class WorkerMonitorStatus {
     );
   }
 }
+
+/// 有状态 Worker 代理缓存的单个数据分类统计（来自 `GET /v1/cache`）。
+class WorkerCacheCategoryStat {
+  const WorkerCacheCategoryStat({
+    required this.category,
+    this.ttlSec = 0,
+    this.activeEntries = 0,
+    this.bytes = 0,
+  });
+
+  final String category;
+  final int ttlSec;
+  final int activeEntries;
+  final int bytes;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'category': category,
+        'ttlSec': ttlSec,
+        'activeEntries': activeEntries,
+        'bytes': bytes,
+      };
+
+  factory WorkerCacheCategoryStat.fromJson(Map<String, dynamic> json) =>
+      WorkerCacheCategoryStat(
+        category: _str(json, 'category'),
+        ttlSec: _int(json, 'ttlSec'),
+        activeEntries: _int(json, 'activeEntries'),
+        bytes: _int(json, 'bytes'),
+      );
+}
+
+/// 有状态 Worker 代理缓存总览与命中统计（来自 `GET /v1/cache`）。
+class WorkerCacheStats {
+  const WorkerCacheStats({
+    this.ok = true,
+    this.enabled = true,
+    this.entryCount = 0,
+    this.totalBytes = 0,
+    this.hits = 0,
+    this.l1Hits = 0,
+    this.l2Hits = 0,
+    this.misses = 0,
+    this.bypasses = 0,
+    this.evictions = 0,
+    this.categories = const <WorkerCacheCategoryStat>[],
+  });
+
+  final bool ok;
+  final bool enabled;
+  final int entryCount;
+  final int totalBytes;
+  final int hits;
+  final int l1Hits;
+  final int l2Hits;
+  final int misses;
+  final int bypasses;
+  final int evictions;
+  final List<WorkerCacheCategoryStat> categories;
+
+  String get formattedSize {
+    if (totalBytes <= 0) return '0 B';
+    if (totalBytes < 1024) return '$totalBytes B';
+    final kb = totalBytes / 1024;
+    if (kb < 1024) return '${kb.toStringAsFixed(kb >= 10 ? 0 : 1)} KB';
+    final mb = kb / 1024;
+    return '${mb.toStringAsFixed(2)} MB';
+  }
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'ok': ok,
+        'enabled': enabled,
+        'entryCount': entryCount,
+        'totalBytes': totalBytes,
+        'formattedSize': formattedSize,
+        'hits': hits,
+        'l1Hits': l1Hits,
+        'l2Hits': l2Hits,
+        'misses': misses,
+        'bypasses': bypasses,
+        'evictions': evictions,
+        'categories': categories.map((c) => c.toJson()).toList(),
+      };
+
+  factory WorkerCacheStats.fromJson(Map<String, dynamic> json) {
+    final rawStats = json['stats'];
+    final statsMap = rawStats is Map
+        ? Map<String, dynamic>.from(rawStats)
+        : json;
+    return WorkerCacheStats(
+      ok: json['ok'] != false,
+      enabled: json['enabled'] != false,
+      entryCount: _int(statsMap, 'entryCount'),
+      totalBytes: _int(statsMap, 'totalBytes'),
+      hits: _int(statsMap, 'hits'),
+      l1Hits: _int(statsMap, 'l1Hits'),
+      l2Hits: _int(statsMap, 'l2Hits'),
+      misses: _int(statsMap, 'misses'),
+      bypasses: _int(statsMap, 'bypasses'),
+      evictions: _int(statsMap, 'evictions'),
+      categories: _parseList(
+        json['categories'],
+        WorkerCacheCategoryStat.fromJson,
+      ),
+    );
+  }
+}
+
+String? _scalarText(Object? value) => switch (value) {
+      String() => value,
+      num() || bool() => value.toString(),
+      _ => null,
+    };
+
+/// 读取并 trim 字符串字段；数字/布尔值按文本读取，缺失或其他类型时回退为 [fallback]。
+String _str(Map<String, dynamic> json, String key, [String fallback = '']) =>
+    (_scalarText(json[key]) ?? fallback).trim();
+
+/// 读取可空字符串字段（不 trim）；数字/布尔值按文本读取，其他类型视为缺失。
+String? _strOrNull(Map<String, dynamic> json, String key) =>
+    _scalarText(json[key]);
+
+/// 读取整数字段；兼容数字字符串，缺失或无法解析时返回 null。
+int? _intOrNull(Map<String, dynamic> json, String key) {
+  final value = json[key];
+  final number = value is String ? num.tryParse(value.trim()) : value;
+  return number is num && number.isFinite ? number.toInt() : null;
+}
+
+int _int(Map<String, dynamic> json, String key, [int fallback = 0]) =>
+    _intOrNull(json, key) ?? fallback;
+
+/// 解析对象数组：非数组返回空列表，跳过非对象元素。
+List<T> _parseList<T>(
+  Object? raw,
+  T Function(Map<String, dynamic> json) fromJson,
+) =>
+    raw is List
+        ? raw
+            .whereType<Map<dynamic, dynamic>>()
+            .map((m) => fromJson(Map<String, dynamic>.from(m)))
+            .toList(growable: false)
+        : List<T>.unmodifiable(const []);

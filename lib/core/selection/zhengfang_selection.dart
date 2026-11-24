@@ -546,6 +546,7 @@ class ZhengfangSelection {
         values.entries.map((e) => (e.key, e.value)),
         referer: _indexReferer,
         ajax: true,
+        confirmedSelection: true,
       ),
     );
     final status = AcademicJson.zfStatus(response.body, response.status);
@@ -615,6 +616,7 @@ class ZhengfangSelection {
         values.entries.map((e) => (e.key, e.value)),
         referer: _indexReferer,
         ajax: true,
+        confirmedSelection: true,
       ),
     );
     final status = AcademicJson.zfStatus(response.body, response.status);

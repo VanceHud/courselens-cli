@@ -59,17 +59,14 @@ class AccountSession {
   String username = '';
   ZhengfangHomeMetadata? zfHomeMetadata;
   AcademicProgressReport? cachedAcademicProgress;
+  EmptyClassroomFilterOptions? cachedClassroomFilters;
 
   int get epoch => _epoch;
   bool get isRetired => _isRetired;
 
   /// 作废当前世代：`epoch` 自增并清空 Cookie，会话仍可继续使用。
   Future<void> invalidate() async {
-    await _generationMutex.withLock(() {
-      _epoch += 1;
-      zfHomeMetadata = null;
-      cachedAcademicProgress = null;
-    });
+    await _generationMutex.withLock(_advanceGeneration);
     await cookies.clear();
   }
 
@@ -77,11 +74,17 @@ class AccountSession {
   Future<void> retire() async {
     await _generationMutex.withLock(() {
       _isRetired = true;
-      _epoch += 1;
-      zfHomeMetadata = null;
-      cachedAcademicProgress = null;
+      _advanceGeneration();
     });
     await cookies.retire();
+  }
+
+  /// 调用方须持有 [_generationMutex]。
+  void _advanceGeneration() {
+    _epoch += 1;
+    zfHomeMetadata = null;
+    cachedAcademicProgress = null;
+    cachedClassroomFilters = null;
   }
 
   void requireActive() => _throwIfRetired();

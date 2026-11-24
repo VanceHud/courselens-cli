@@ -4,7 +4,7 @@ import http from "node:http";
 import test from "node:test";
 
 import worker, { PortalSessionVault } from "../src/index.js";
-import { bytesToBase64, parsePortalEnvConfig } from "../src/protocol.js";
+import { bytesToBase64, parsePortalEnvConfig, safeJsonParse } from "../src/protocol.js";
 
 function createDurableObjectHarness(envRef) {
   const backingMap = new Map();
@@ -426,4 +426,13 @@ test("Dynamic Cookie Push (POST /v1/session/cookies) and COOKIE_ONLY sentinel wo
   );
   assert.equal(postEvict.status, 200);
   assert.equal((await postEvict.json()).studentInfo.studentId, "20250999");
+});
+
+test("safeJsonParse returns parsed JSON or null without throwing", () => {
+  assert.deepEqual(safeJsonParse('{"flag":"1"}'), { flag: "1" });
+  assert.deepEqual(safeJsonParse("[1,2]"), [1, 2]);
+  assert.equal(safeJsonParse("<html>login</html>"), null);
+  assert.equal(safeJsonParse(""), null);
+  assert.equal(safeJsonParse(null), null);
+  assert.equal(safeJsonParse(undefined), null);
 });

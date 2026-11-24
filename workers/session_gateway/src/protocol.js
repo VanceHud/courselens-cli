@@ -4,6 +4,23 @@
  */
 
 import { ServerCookieJar } from "./cookie_jar.js";
+import {
+  PortalProtocolError,
+  base64ToBytes,
+  bytesToBase64,
+  isHostAllowed,
+  isPrivateOrLoopbackHost,
+  upgradeSameHostHttpRedirect,
+} from "./net_policy.js";
+
+export {
+  PortalProtocolError,
+  base64ToBytes,
+  bytesToBase64,
+  isHostAllowed,
+  isPrivateOrLoopbackHost,
+  upgradeSameHostHttpRedirect,
+};
 
 export const MAX_REDIRECTS = 12;
 export const MAX_UPSTREAM_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -31,15 +48,6 @@ const STRIPPED_CLIENT_HEADERS = new Set([
   "x-forwarded-proto",
   "x-real-ip",
 ]);
-
-export class PortalProtocolError extends Error {
-  constructor(status, message, httpStatus = 502) {
-    super(message);
-    this.name = "PortalProtocolError";
-    this.status = status;
-    this.httpStatus = httpStatus;
-  }
-}
 
 export function trimTrailingSlash(str) {
   let s = String(str || "").trim();
@@ -206,6 +214,18 @@ export function parsePortalEnvConfig(env = {}) {
   const keepaliveMaxIdleSec = parseNonNegativeInt(env.KEEPALIVE_MAX_IDLE_SEC, 86400);
   const sessionVerifyTtlSec = parseNonNegativeInt(env.SESSION_VERIFY_TTL_SEC, 120);
 
+  const proxyCacheEnabled = parseBoolFlag(env.PROXY_CACHE_ENABLED, true);
+  const cacheTtls = {
+    catalog: parseNonNegativeInt(env.CACHE_TTL_CATALOG_SEC, 1800),
+    schedule: parseNonNegativeInt(env.CACHE_TTL_SCHEDULE_SEC, 1800),
+    grades: parseNonNegativeInt(env.CACHE_TTL_GRADES_SEC, 300),
+    exams: parseNonNegativeInt(env.CACHE_TTL_EXAMS_SEC, 600),
+    progress: parseNonNegativeInt(env.CACHE_TTL_PROGRESS_SEC, 3600),
+    enrolled: parseNonNegativeInt(env.CACHE_TTL_ENROLLED_SEC, 600),
+    classrooms: parseNonNegativeInt(env.CACHE_TTL_CLASSROOMS_SEC, 120),
+    static: parseNonNegativeInt(env.CACHE_TTL_STATIC_SEC, 86400),
+  };
+
   return {
     portalUrl,
     casUrl,
@@ -222,6 +242,10 @@ export function parsePortalEnvConfig(env = {}) {
     keepaliveMs: keepaliveSec * 1000,
     keepaliveMaxIdleMs: keepaliveMaxIdleSec * 1000,
     sessionVerifyTtlMs: sessionVerifyTtlSec * 1000,
+    cache: {
+      enabled: proxyCacheEnabled,
+      ttls: cacheTtls,
+    },
   };
 }
 
@@ -232,6 +256,16 @@ function parseNonNegativeInt(raw, fallback) {
   const parsed = Number.parseInt(String(raw).trim(), 10);
   if (Number.isNaN(parsed) || parsed < 0) return fallback;
   return parsed;
+}
+
+function parseBoolFlag(raw, fallback) {
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return fallback;
+  }
+  const lower = String(raw).trim().toLowerCase();
+  if (["0", "false", "no", "off"].includes(lower)) return false;
+  if (["1", "true", "yes", "on"].includes(lower)) return true;
+  return fallback;
 }
 
 function deriveSchoolId(hostname) {
@@ -255,297 +289,6 @@ export async function computeConfigFingerprint(config) {
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-}
-
-export function isHostAllowed(targetUrl, allowedHosts, requireSecure) {
-  let u;
-  try {
-    u = new URL(targetUrl);
-  } catch {
-    return false;
-  }
-  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
-  if (u.username || u.password) return false;
-  if (requireSecure && u.protocol !== "https:") return false;
-
-  const targetHost = u.hostname.replace(/\.+$/, "").toLowerCase();
-  if (!targetHost) return false;
-  const targetPort = u.port ? Number(u.port) : (u.protocol === "https:" ? 443 : 80);
-
-  for (const rawEntry of allowedHosts) {
-    const trimmed = String(rawEntry || "").trim();
-    if (!trimmed || trimmed.includes("*") || trimmed.includes("@")) continue;
-    const hasExplicitScheme = trimmed.includes("://");
-    const candidate = hasExplicitScheme ? trimmed : `https://${trimmed}`;
-    let entryUrl;
-    try {
-      entryUrl = new URL(candidate);
-    } catch {
-      continue;
-    }
-    if (entryUrl.protocol !== "http:" && entryUrl.protocol !== "https:") continue;
-    if (
-      entryUrl.username ||
-      entryUrl.password ||
-      (entryUrl.pathname && entryUrl.pathname !== "/") ||
-      entryUrl.search ||
-      entryUrl.hash
-    ) {
-      continue;
-    }
-    const entryHost = entryUrl.hostname.replace(/\.+$/, "").toLowerCase();
-    if (entryHost !== targetHost) continue;
-
-    if (hasExplicitScheme) {
-      // Never allow plaintext HTTP downgrade on an origin explicitly configured as https://
-      if (entryUrl.protocol === "https:" && u.protocol !== "https:") continue;
-      if (entryUrl.port) {
-        if (entryUrl.protocol !== u.protocol || Number(entryUrl.port) !== targetPort) {
-          continue;
-        }
-      } else if (entryUrl.protocol === "https:") {
-        if (targetPort !== 443) continue;
-      } else {
-        // Explicit http:// without custom port: allow http:80 and transparent https:443 upgrade only.
-        const validDefaultPort =
-          (u.protocol === "http:" && targetPort === 80) ||
-          (u.protocol === "https:" && targetPort === 443);
-        if (!validDefaultPort) continue;
-      }
-    } else if (entryUrl.port) {
-      if (Number(entryUrl.port) !== targetPort) continue;
-    } else {
-      const validDefaultPort =
-        (u.protocol === "https:" && targetPort === 443) ||
-        (u.protocol === "http:" && targetPort === 80);
-      if (!validDefaultPort) continue;
-    }
-    return true;
-  }
-  return false;
-}
-
-function isPrivateOrReservedIpv4Octets(a, b, c, d) {
-  if (
-    !Number.isInteger(a) ||
-    !Number.isInteger(b) ||
-    !Number.isInteger(c) ||
-    !Number.isInteger(d) ||
-    a < 0 ||
-    a > 255 ||
-    b < 0 ||
-    b > 255 ||
-    c < 0 ||
-    c > 255 ||
-    d < 0 ||
-    d > 255
-  ) {
-    return true;
-  }
-  if (a === 0 || a === 10 || a === 127) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true; // RFC 6598 CGNAT 100.64.0.0/10
-  if (a === 169 && b === 254) return true; // Link-local / Cloud Metadata 169.254.0.0/16
-  if (a === 172 && b >= 16 && b <= 31) return true; // RFC 1918 172.16.0.0/12
-  if (a === 192 && b === 0 && c === 0) return true; // IETF Protocol Assignments 192.0.0.0/24
-  if (a === 192 && b === 0 && c === 2) return true; // TEST-NET-1 192.0.2.0/24
-  if (a === 192 && b === 168) return true; // RFC 1918 192.168.0.0/16
-  if (a === 198 && (b === 18 || b === 19)) return true; // Benchmarking 198.18.0.0/15
-  if (a === 198 && b === 51 && c === 100) return true; // TEST-NET-2
-  if (a === 203 && b === 0 && c === 113) return true; // TEST-NET-3
-  if (a >= 224) return true; // Multicast 224.0.0.0/4 & Reserved/Broadcast 240.0.0.0/4
-  return false;
-}
-
-function parseIpv6Words(rawIpv6) {
-  const zoneIdx = rawIpv6.indexOf("%");
-  const addr = zoneIdx >= 0 ? rawIpv6.slice(0, zoneIdx) : rawIpv6;
-  if (!addr || !addr.includes(":")) return null;
-
-  let working = addr;
-  // Convert trailing dotted IPv4 (e.g. ::ffff:127.0.0.1) into two 16-bit hex groups.
-  const lastColon = working.lastIndexOf(":");
-  const tail = working.slice(lastColon + 1);
-  if (tail.includes(".")) {
-    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(tail);
-    if (!v4) return null;
-    const octets = [Number(v4[1]), Number(v4[2]), Number(v4[3]), Number(v4[4])];
-    if (octets.some((o) => o < 0 || o > 255)) return null;
-    const hi = ((octets[0] << 8) | octets[1]).toString(16);
-    const lo = ((octets[2] << 8) | octets[3]).toString(16);
-    working = `${working.slice(0, lastColon + 1)}${hi}:${lo}`;
-  }
-
-  const dblParts = working.split("::");
-  if (dblParts.length > 2) return null;
-
-  const parseSide = (side) => {
-    if (!side) return [];
-    const groups = side.split(":");
-    const words = [];
-    for (const g of groups) {
-      if (!/^[0-9a-f]{1,4}$/i.test(g)) return null;
-      words.push(Number.parseInt(g, 16));
-    }
-    return words;
-  };
-
-  if (dblParts.length === 1) {
-    const words = parseSide(dblParts[0]);
-    return words && words.length === 8 ? words : null;
-  }
-
-  const left = parseSide(dblParts[0]);
-  const right = parseSide(dblParts[1]);
-  if (!left || !right || left.length + right.length >= 8) return null;
-  const zeros = new Array(8 - left.length - right.length).fill(0);
-  return [...left, ...zeros, ...right];
-}
-
-function checkEmbeddedV4Words(hiWord, loWord) {
-  return isPrivateOrReservedIpv4Octets(
-    (hiWord >> 8) & 0xff,
-    hiWord & 0xff,
-    (loWord >> 8) & 0xff,
-    loWord & 0xff,
-  );
-}
-
-export function isPrivateOrLoopbackHost(hostname) {
-  const h = String(hostname || "")
-    .trim()
-    .replace(/^\[|\]$/g, "")
-    .replace(/\.+$/g, "")
-    .toLowerCase();
-  if (
-    !h ||
-    h === "localhost" ||
-    h.endsWith(".localhost") ||
-    h.endsWith(".local") ||
-    h.endsWith(".internal")
-  ) {
-    return true;
-  }
-
-  if (h.includes(":")) {
-    const words = parseIpv6Words(h);
-    // Fail closed if IPv6 literal cannot be parsed cleanly.
-    if (!words) return true;
-    const [w0, w1, w2, w3, w4, w5, w6, w7] = words;
-
-    // ::/128 unspecified or ::1/128 loopback
-    if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0 && w5 === 0 && w6 === 0 && (w7 === 0 || w7 === 1)) {
-      return true;
-    }
-    // ::/96 IPv4-compatible IPv6 & ::ffff:0:0/96 IPv4-mapped IPv6
-    if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0 && (w5 === 0 || w5 === 0xffff)) {
-      return checkEmbeddedV4Words(w6, w7);
-    }
-    // ::ffff:0:0:0/96 IPv4-translated addresses (RFC 2765)
-    if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0xffff && w5 === 0) {
-      return checkEmbeddedV4Words(w6, w7);
-    }
-    // 64:ff9b::/96 & 64:ff9b:1::/48 NAT64 (RFC 6052 / RFC 8215)
-    if (w0 === 0x0064 && w1 === 0xff9b && ((w2 === 0 && w3 === 0 && w4 === 0 && w5 === 0) || w2 === 1)) {
-      return checkEmbeddedV4Words(w6, w7);
-    }
-    // 2002::/16 6to4 embedding IPv4 in w1..w2
-    if (w0 === 0x2002 && checkEmbeddedV4Words(w1, w2)) {
-      return true;
-    }
-    // 100::/64 Discard-Only (RFC 6666)
-    if (w0 === 0x0100 && w1 === 0 && w2 === 0 && w3 === 0) return true;
-    // 2001:db8::/32 Documentation (RFC 3849)
-    if (w0 === 0x2001 && w1 === 0x0db8) return true;
-    // fc00::/7 Unique Local (fc00..fdff)
-    if ((w0 & 0xfe00) === 0xfc00) return true;
-    // fe80::/10 Link-Local (fe80..febf)
-    if ((w0 & 0xffc0) === 0xfe80) return true;
-    // ff00::/8 Multicast
-    if ((w0 & 0xff00) === 0xff00) return true;
-    return false;
-  }
-
-  // Block pure numeric/hex single-label IPv4 representations (if not already normalized by WHATWG URL).
-  if (/^(?:0x[0-9a-f]+|\d+)$/i.test(h)) {
-    return true;
-  }
-
-  const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(h);
-  if (v4) {
-    return isPrivateOrReservedIpv4Octets(
-      Number(v4[1]),
-      Number(v4[2]),
-      Number(v4[3]),
-      Number(v4[4]),
-    );
-  }
-  return false;
-}
-
-export function upgradeSameHostHttpRedirect(currentUrl, targetUrl) {
-  let src;
-  let dst;
-  try {
-    src = new URL(currentUrl);
-    dst = new URL(targetUrl);
-  } catch {
-    return targetUrl;
-  }
-  if (src.username || src.password || dst.username || dst.password) {
-    return targetUrl;
-  }
-  const srcDefaultHttps =
-    src.protocol === "https:" && (src.port === "" || src.port === "443");
-  const dstDefaultHttp =
-    dst.protocol === "http:" && (dst.port === "" || dst.port === "80");
-  if (
-    srcDefaultHttps &&
-    dstDefaultHttp &&
-    src.hostname.replace(/\.+$/, "").toLowerCase() ===
-      dst.hostname.replace(/\.+$/, "").toLowerCase()
-  ) {
-    dst.protocol = "https:";
-    dst.port = "";
-    return dst.toString();
-  }
-  return targetUrl;
-}
-
-export function bytesToBase64(bytes) {
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    const sub = bytes.subarray(i, i + chunk);
-    for (let j = 0; j < sub.length; j++) {
-      binary += String.fromCharCode(sub[j]);
-    }
-  }
-  return btoa(binary);
-}
-
-export function base64ToBytes(b64) {
-  let clean = String(b64 || "")
-    .replace(/\s+/g, "")
-    .replace(/-/g, "+")
-    .replace(/_/g, "/");
-  if (!clean) return new Uint8Array(0);
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(clean) || clean.length % 4 === 1) {
-    throw new PortalProtocolError("VALIDATION_FAILED", "无效的 Base64 编码请求体", 400);
-  }
-  while (clean.length % 4 !== 0) {
-    clean += "=";
-  }
-  let binary;
-  try {
-    binary = atob(clean);
-  } catch {
-    throw new PortalProtocolError("VALIDATION_FAILED", "无效的 Base64 编码请求体", 400);
-  }
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    out[i] = binary.charCodeAt(i);
-  }
-  return out;
 }
 
 export async function readBoundedResponseBytes(
@@ -666,13 +409,16 @@ export async function executeWithCookieJar({
   allowPrivateLoopback = false,
   nowFn = Date.now,
   maxResponseBytes = MAX_UPSTREAM_RESPONSE_BYTES,
+  uncertainWrite = false,
+  allowRequest = null,
 }) {
   const normalizedMethod = String(method || "GET").toUpperCase();
   if (normalizedMethod !== "GET" && normalizedMethod !== "POST") {
     throw new PortalProtocolError("UNTRUSTED_URL", "仅支持 GET / POST 请求", 400);
   }
 
-  if (!isHostAllowed(url, policy.allowedHosts, policy.requireSecure)) {
+  if (!isHostAllowed(url, policy.allowedHosts, policy.requireSecure) ||
+      (allowRequest && !allowRequest(normalizedMethod, url))) {
     throw new PortalProtocolError(
       "UNTRUSTED_URL",
       `目标域名不在当前 Worker 绑定的高校白名单内：${url}`,
@@ -726,7 +472,7 @@ export async function executeWithCookieJar({
         const lower = k.toLowerCase();
         if (STRIPPED_CLIENT_HEADERS.has(lower) || lower.startsWith("cf-")) continue;
         if (convertedPostToGet && lower === "content-type") continue;
-        if (isCrossOriginHop && lower === "origin") continue;
+        if (isCrossOriginHop && (lower === "origin" || lower === "referer")) continue;
         if (lower === "user-agent") hasUserAgent = true;
         outgoingHeaders.set(k, Array.isArray(v) ? String(v[0] ?? "") : String(v));
       }
@@ -746,123 +492,134 @@ export async function executeWithCookieJar({
       ? setTimeout(() => controller.abort(new Error("UPSTREAM_TIMEOUT")), timeoutMs)
       : null;
 
-    let upstream;
     try {
-      upstream = await fetchImpl(currentUrl, {
-        method: currentMethod,
-        headers: outgoingHeaders,
-        body: currentBody && currentMethod === "POST" ? currentBody : undefined,
-        redirect: "manual",
-        signal: controller.signal,
-      });
-    } catch (err) {
-      const isTimeout =
-        controller.signal.aborted ||
-        String(err && err.name) === "AbortError" ||
-        String(err && err.message).includes("UPSTREAM_TIMEOUT");
-      // Security Redline #3: Never auto-retry or mask an in-flight POST timeout,
-      // nor a failure on a redirect hop after hop 0 POST was already accepted by upstream.
-      if (startedWithPost && (isTimeout || hop > 0)) {
+      let upstream;
+      try {
+        upstream = await fetchImpl(currentUrl, {
+          method: currentMethod,
+          headers: outgoingHeaders,
+          body: currentBody && currentMethod === "POST" ? currentBody : undefined,
+          redirect: "manual",
+          signal: controller.signal,
+        });
+      } catch (err) {
+        const isTimeout =
+          controller.signal.aborted ||
+          String(err && err.name) === "AbortError" ||
+          String(err && err.message).includes("UPSTREAM_TIMEOUT");
+        // Security Redline #3: Never auto-retry or mask an in-flight POST timeout,
+        // nor a failure on a redirect hop after hop 0 POST was already accepted by upstream.
+        if (startedWithPost && (uncertainWrite || isTimeout || hop > 0)) {
+          throw new PortalProtocolError(
+            "RESULT_UNKNOWN",
+            "连接教务上游写接口超时或重定向中断，结果未知（已阻断自动重发，请核实已选名单）",
+            504,
+          );
+        }
         throw new PortalProtocolError(
-          "RESULT_UNKNOWN",
-          "连接教务上游写接口超时或重定向中断，结果未知（已阻断自动重发，请核实已选名单）",
-          504,
+          "NETWORK_ERROR",
+          isTimeout ? `连接教务上游超时：${currentUrl}` : `连接教务上游失败：${err}`,
+          502,
         );
       }
-      throw new PortalProtocolError(
-        "NETWORK_ERROR",
-        isTimeout ? `连接教务上游超时：${currentUrl}` : `连接教务上游失败：${err}`,
-        502,
-      );
+
+      const setCookies = typeof upstream.headers.getSetCookie === "function"
+        ? upstream.headers.getSetCookie()
+        : (upstream.headers.get("set-cookie") ? [upstream.headers.get("set-cookie")] : []);
+
+      if (jar.absorbSetCookies(setCookies, currentUrl, nowFn()) > 0) {
+        cookiesMutated = true;
+      }
+
+      const status = upstream.status;
+      const location = upstream.headers.get("location");
+      const isRedirect =
+        status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+
+      if (!followRedirects || !isRedirect || !location) {
+        const bodyBuf = await readBoundedResponseBytes(upstream, maxResponseBytes);
+        return {
+          status,
+          finalUrl: currentUrl,
+          headers: serializeHeadersWithoutCookies(upstream.headers),
+          bodyBytes: bodyBuf,
+          cookiesMutated,
+          hopCount: hop,
+          firstHopWasLoginRedirect,
+        };
+      }
+
+      if (hop === MAX_REDIRECTS) {
+        if (startedWithPost) {
+          throw new PortalProtocolError(
+            "RESULT_UNKNOWN",
+            "写请求后教务重定向超过上限，结果未知（已阻断自动重发）",
+            504,
+          );
+        }
+        throw new PortalProtocolError("NETWORK_ERROR", "教务上游重定向次数超过上限", 502);
+      }
+
+      let resolvedNextUrl;
+      try {
+        resolvedNextUrl = new URL(location, currentUrl).toString();
+      } catch {
+        throw new PortalProtocolError("UNTRUSTED_URL", `非法重定向地址：${location}`, 400);
+      }
+
+      const nextUrl = upgradeSameHostHttpRedirect(currentUrl, resolvedNextUrl);
+      if (hop === 0 && isLoginUrlPath(nextUrl)) {
+        firstHopWasLoginRedirect = true;
+      }
+
+      const nextHostname = new URL(nextUrl).hostname;
+      const nextMethod = status === 301 || status === 302 || status === 303
+        ? "GET" : currentMethod;
+      if (
+        !isHostAllowed(nextUrl, policy.allowedHosts, policy.requireSecure) ||
+        (allowRequest && !allowRequest(nextMethod, nextUrl)) ||
+        (nextMethod === "POST" && new URL(nextUrl).origin !== parsed.origin) ||
+        (!allowPrivateLoopback && isPrivateOrLoopbackHost(nextHostname))
+      ) {
+        const bodyBuf = await readBoundedResponseBytes(upstream, maxResponseBytes);
+        const outHeaders = serializeHeadersWithoutCookies(upstream.headers);
+        outHeaders[BLOCKED_REDIRECT_HEADER] = [nextUrl];
+        return {
+          status,
+          finalUrl: currentUrl,
+          headers: outHeaders,
+          bodyBytes: bodyBuf,
+          cookiesMutated,
+          hopCount: hop,
+          firstHopWasLoginRedirect,
+        };
+      }
+
+      // Drain unused redirect body to release connection resources cleanly.
+      if (upstream.body && typeof upstream.body.cancel === "function") {
+        try {
+          await upstream.body.cancel();
+        } catch {
+          // Ignore cancel error.
+        }
+      }
+
+      if (status === 301 || status === 302 || status === 303) {
+        if (currentMethod === "POST") {
+          convertedPostToGet = true;
+        }
+        currentMethod = "GET";
+        currentBody = null;
+      }
+      currentUrl = nextUrl;
+    } catch (error) {
+      if (uncertainWrite && startedWithPost && error?.status !== "RESULT_UNKNOWN") {
+        throw new PortalProtocolError("RESULT_UNKNOWN", "选退课响应未能完整读取，请核对已选名单", 504);
+      }
+      throw error;
     } finally {
       if (timer !== null) clearTimeout(timer);
     }
-
-    const setCookies = typeof upstream.headers.getSetCookie === "function"
-      ? upstream.headers.getSetCookie()
-      : (upstream.headers.get("set-cookie") ? [upstream.headers.get("set-cookie")] : []);
-
-    if (jar.absorbSetCookies(setCookies, currentUrl, nowFn()) > 0) {
-      cookiesMutated = true;
-    }
-
-    const status = upstream.status;
-    const location = upstream.headers.get("location");
-    const isRedirect =
-      status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
-
-    if (!followRedirects || !isRedirect || !location) {
-      const bodyBuf = await readBoundedResponseBytes(upstream, maxResponseBytes);
-      return {
-        status,
-        finalUrl: currentUrl,
-        headers: serializeHeadersWithoutCookies(upstream.headers),
-        bodyBytes: bodyBuf,
-        cookiesMutated,
-        hopCount: hop,
-        firstHopWasLoginRedirect,
-      };
-    }
-
-    if (hop === MAX_REDIRECTS) {
-      if (startedWithPost) {
-        throw new PortalProtocolError(
-          "RESULT_UNKNOWN",
-          "写请求后教务重定向超过上限，结果未知（已阻断自动重发）",
-          504,
-        );
-      }
-      throw new PortalProtocolError("NETWORK_ERROR", "教务上游重定向次数超过上限", 502);
-    }
-
-    let resolvedNextUrl;
-    try {
-      resolvedNextUrl = new URL(location, currentUrl).toString();
-    } catch {
-      throw new PortalProtocolError("UNTRUSTED_URL", `非法重定向地址：${location}`, 400);
-    }
-
-    const nextUrl = upgradeSameHostHttpRedirect(currentUrl, resolvedNextUrl);
-    if (hop === 0 && isLoginUrlPath(nextUrl)) {
-      firstHopWasLoginRedirect = true;
-    }
-
-    const nextHostname = new URL(nextUrl).hostname;
-    if (
-      !isHostAllowed(nextUrl, policy.allowedHosts, policy.requireSecure) ||
-      (!allowPrivateLoopback && isPrivateOrLoopbackHost(nextHostname))
-    ) {
-      const bodyBuf = await readBoundedResponseBytes(upstream, maxResponseBytes);
-      const outHeaders = serializeHeadersWithoutCookies(upstream.headers);
-      outHeaders[BLOCKED_REDIRECT_HEADER] = [nextUrl];
-      return {
-        status,
-        finalUrl: currentUrl,
-        headers: outHeaders,
-        bodyBytes: bodyBuf,
-        cookiesMutated,
-        hopCount: hop,
-        firstHopWasLoginRedirect,
-      };
-    }
-
-    // Drain unused redirect body to release connection resources cleanly.
-    if (upstream.body && typeof upstream.body.cancel === "function") {
-      try {
-        await upstream.body.cancel();
-      } catch {
-        // Ignore cancel error.
-      }
-    }
-
-    if (status === 301 || status === 302 || status === 303) {
-      if (currentMethod === "POST") {
-        convertedPostToGet = true;
-      }
-      currentMethod = "GET";
-      currentBody = null;
-    }
-    currentUrl = nextUrl;
   }
 
   throw new PortalProtocolError("NETWORK_ERROR", "重定向异常终止", 502);
@@ -1135,6 +892,14 @@ function stripScriptsAndComments(html) {
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(SCRIPT_BLOCK_RE, "")
     .replace(STYLE_BLOCK_RE, "");
+}
+
+export function safeJsonParse(body) {
+  try {
+    return JSON.parse(String(body || ""));
+  } catch {
+    return null;
+  }
 }
 
 export function stripHtmlToText(fragment) {

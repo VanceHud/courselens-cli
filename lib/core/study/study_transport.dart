@@ -27,9 +27,11 @@ class StudyTransport {
     required AccountSession session,
     required HttpEngine engine,
     required TextDecoder decoder,
+    String? defaultRefererPath,
   })  : _session = session,
         _engine = engine,
-        _decoder = decoder;
+        _decoder = decoder,
+        _defaultRefererPath = defaultRefererPath;
 
   static const String _httpPrefix = 'http://';
   static const String _httpsPrefix = 'https://';
@@ -45,6 +47,9 @@ class StudyTransport {
   final AccountSession _session;
   final HttpEngine _engine;
   final TextDecoder _decoder;
+
+  /// POST/AJAX 未显式传 Referer 时使用的站内路径；为空则退回请求 origin。
+  final String? _defaultRefererPath;
 
   AccountSession get session => _session;
 
@@ -64,11 +69,7 @@ class StudyTransport {
     return Urls.resolve('$base/', rel);
   }
 
-  Future<FetchedPage> fetch(
-    String url, {
-    String? referer,
-    bool ajax = false,
-  }) =>
+  Future<FetchedPage> fetch(String url, {String? referer, bool ajax = false}) =>
       _send(
         method: HttpMethod.get,
         url: url,
@@ -82,6 +83,7 @@ class StudyTransport {
     Iterable<(String, String)> fields, {
     String? referer,
     bool ajax = false,
+    bool confirmedSelection = false,
   }) =>
       _send(
         method: HttpMethod.post,
@@ -89,6 +91,7 @@ class StudyTransport {
         body: _encodeForm(fields),
         referer: referer,
         ajax: ajax,
+        confirmedSelection: confirmedSelection,
       );
 
   String withQuery(String url, Map<String, String> fields) {
@@ -126,13 +129,11 @@ class StudyTransport {
     required Uint8List? body,
     required String? referer,
     required bool ajax,
+    bool confirmedSelection = false,
   }) async {
     final target = Urls.parseUrl(url);
     if (target == null) {
-      throw AcademicException(
-        AcademicStatus.UNTRUSTED_URL,
-        '教务地址解析失败：$url',
-      );
+      throw AcademicException(AcademicStatus.UNTRUSTED_URL, '教务地址解析失败：$url');
     }
     final headers = await _requestHeaders(method, url, referer, ajax);
     final answer = await _session.withProtocolLock(
@@ -142,6 +143,7 @@ class StudyTransport {
           url: url,
           headers: headers,
           body: body,
+          confirmedSelection: confirmedSelection,
         ),
       ),
     );
@@ -190,9 +192,9 @@ class StudyTransport {
   }
 
   String? _defaultReferer(String? origin) {
-    final base = _session.baseUrl.trim();
-    if (base.isNotEmpty) {
-      return resolveUrl('xtgl/index_initMenu.html?jsdm=xs');
+    final path = _defaultRefererPath;
+    if (path != null && _session.baseUrl.trim().isNotEmpty) {
+      return resolveUrl(path);
     }
     return origin;
   }

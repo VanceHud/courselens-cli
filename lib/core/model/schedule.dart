@@ -18,6 +18,17 @@ class PeriodSpan {
 
   int get length => end - start + 1;
 
+  Map<String, Object?> toJson() => <String, Object?>{
+        'start': start,
+        'end': end,
+      };
+
+  factory PeriodSpan.fromJson(Map<String, dynamic> json) {
+    final s = ((json['start'] as num?)?.toInt() ?? 1).clamp(1, maxPeriod);
+    final e = ((json['end'] as num?)?.toInt() ?? s).clamp(s, maxPeriod);
+    return PeriodSpan(s, e);
+  }
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -52,6 +63,23 @@ class WeekPattern {
   bool contains(int week) => weeks.contains(week);
 
   bool overlaps(WeekPattern other) => weeks.any(other.weeks.contains);
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'weeks': (weeks.toList()..sort()),
+        'text': text,
+      };
+
+  factory WeekPattern.fromJson(Map<String, dynamic> json) {
+    final rawWeeks = json['weeks'];
+    final parsed = <int>[];
+    if (rawWeeks is List) {
+      for (final item in rawWeeks) {
+        final v = (item as num?)?.toInt();
+        if (v != null) parsed.add(v);
+      }
+    }
+    return WeekPattern(parsed, json['text'] as String? ?? '');
+  }
 
   @override
   bool operator ==(Object other) {
@@ -109,6 +137,50 @@ class ScheduleEntry {
   final String teachingFormSymbol;
 
   bool occursIn(int week) => weeks.contains(week);
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'name': name,
+        'teacher': teacher,
+        'location': location,
+        'day': day,
+        'period': period.toJson(),
+        'weeks': weeks.toJson(),
+        'sourceId': sourceId,
+        'courseCode': courseCode,
+        'teachingClass': teachingClass,
+        'credits': credits,
+        'assessment': assessment,
+        'courseCategory': courseCategory,
+        'campus': campus,
+        'isRetake': isRetake,
+        'teachingFormSymbol': teachingFormSymbol,
+      };
+
+  factory ScheduleEntry.fromJson(Map<String, dynamic> json) {
+    final rawPeriod = json['period'];
+    final rawWeeks = json['weeks'];
+    return ScheduleEntry(
+      name: json['name'] as String? ?? '',
+      teacher: json['teacher'] as String? ?? '',
+      location: json['location'] as String? ?? '',
+      day: ((json['day'] as num?)?.toInt() ?? 1).clamp(1, 7),
+      period: rawPeriod is Map
+          ? PeriodSpan.fromJson(Map<String, dynamic>.from(rawPeriod))
+          : PeriodSpan(1, 2),
+      weeks: rawWeeks is Map
+          ? WeekPattern.fromJson(Map<String, dynamic>.from(rawWeeks))
+          : WeekPattern.empty,
+      sourceId: json['sourceId'] as String? ?? '',
+      courseCode: json['courseCode'] as String? ?? '',
+      teachingClass: json['teachingClass'] as String? ?? '',
+      credits: json['credits'] as String? ?? '',
+      assessment: json['assessment'] as String? ?? '',
+      courseCategory: json['courseCategory'] as String? ?? '',
+      campus: json['campus'] as String? ?? '',
+      isRetake: json['isRetake'] == true,
+      teachingFormSymbol: json['teachingFormSymbol'] as String? ?? '',
+    );
+  }
 
   @override
   bool operator ==(Object other) =>
@@ -184,6 +256,35 @@ class PracticalCourse {
   final String courseCode;
   final String teachingClass;
 
+  Map<String, Object?> toJson() => <String, Object?>{
+        'name': name,
+        'teacher': teacher,
+        'credits': credits,
+        'weeksText': weeksText,
+        'summary': summary,
+        'category': category,
+        'assessment': assessment,
+        'campus': campus,
+        'isRetake': isRetake,
+        'courseCode': courseCode,
+        'teachingClass': teachingClass,
+      };
+
+  factory PracticalCourse.fromJson(Map<String, dynamic> json) =>
+      PracticalCourse(
+        name: json['name'] as String? ?? '',
+        teacher: json['teacher'] as String? ?? '',
+        credits: json['credits'] as String? ?? '',
+        weeksText: json['weeksText'] as String? ?? '',
+        summary: json['summary'] as String? ?? '',
+        category: json['category'] as String? ?? '',
+        assessment: json['assessment'] as String? ?? '',
+        campus: json['campus'] as String? ?? '',
+        isRetake: json['isRetake'] == true,
+        courseCode: json['courseCode'] as String? ?? '',
+        teachingClass: json['teachingClass'] as String? ?? '',
+      );
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -230,4 +331,45 @@ class Schedule {
   final List<PracticalCourse> practicalCourses;
   final StudentIdentity? studentInfo;
   final String termId;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'entries': entries.map((e) => e.toJson()).toList(growable: false),
+        'practicalCourses':
+            practicalCourses.map((e) => e.toJson()).toList(growable: false),
+        if (studentInfo != null && !studentInfo!.isEmpty)
+          'studentInfo': studentInfo!.toJson(),
+        'termId': termId,
+      };
+
+  factory Schedule.fromJson(Map<String, dynamic> json) {
+    final rawEntries = json['entries'];
+    final entries = <ScheduleEntry>[];
+    if (rawEntries is List) {
+      for (final item in rawEntries) {
+        if (item is Map) {
+          entries.add(ScheduleEntry.fromJson(Map<String, dynamic>.from(item)));
+        }
+      }
+    }
+    final rawPracticals = json['practicalCourses'];
+    final practicals = <PracticalCourse>[];
+    if (rawPracticals is List) {
+      for (final item in rawPracticals) {
+        if (item is Map) {
+          practicals
+              .add(PracticalCourse.fromJson(Map<String, dynamic>.from(item)));
+        }
+      }
+    }
+    final rawStudent = json['studentInfo'];
+    final student = rawStudent is Map
+        ? StudentIdentity.fromJson(Map<String, dynamic>.from(rawStudent))
+        : null;
+    return Schedule(
+      entries: entries,
+      practicalCourses: practicals,
+      studentInfo: student,
+      termId: json['termId'] as String? ?? '',
+    );
+  }
 }

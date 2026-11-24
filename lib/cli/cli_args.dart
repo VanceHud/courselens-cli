@@ -37,6 +37,8 @@ enum CliCommandKind {
   workerMonitorStatus,
   workerMonitorSet,
   workerMonitorCheck,
+  workerCacheStatus,
+  workerCacheClear,
   today,
   schedule,
   grades,
@@ -54,6 +56,7 @@ class CliGlobalOptions {
   const CliGlobalOptions({
     this.demo = false,
     this.json = false,
+    this.noCache = false,
     this.term,
     this.relayUrl,
     this.workerUrl,
@@ -65,6 +68,7 @@ class CliGlobalOptions {
 
   final bool demo;
   final bool json;
+  final bool noCache;
   final String? term;
   final String? relayUrl;
   final String? workerUrl;
@@ -108,6 +112,7 @@ class ParsedCliInvocation {
     this.monitorExams,
     this.resetBaseline = false,
     this.monitorKind = 'all',
+    this.cacheCategory,
     this.date,
     this.parsedDate,
     this.week,
@@ -153,7 +158,7 @@ class ParsedCliInvocation {
   final String? harPath;
   final bool noVerify;
 
-  // worker tasks / webhook / monitor
+  // worker tasks / webhook / monitor / cache
   final String? taskId;
   final int? intervalSec;
   final String? webhookProvider;
@@ -164,6 +169,7 @@ class ParsedCliInvocation {
   final bool? monitorExams;
   final bool resetBaseline;
   final String monitorKind;
+  final String? cacheCategory;
 
   // today
   final String? date;
@@ -203,7 +209,7 @@ class ParsedCliInvocation {
 class CliArgs {
   const CliArgs._();
 
-  static const String cliVersion = '1.1.0';
+  static const String cliVersion = '1.1.8';
 
   static const Set<String> validStores = <String>{
     'auto',
@@ -234,6 +240,17 @@ class CliArgs {
     'all',
     'grades',
     'exams',
+  };
+
+  static const Set<String> validCacheCategories = <String>{
+    'catalog',
+    'schedule',
+    'grades',
+    'exams',
+    'progress',
+    'enrolled',
+    'classrooms',
+    'static',
   };
 
   /// 解析命令行参数。
@@ -271,6 +288,7 @@ class CliArgs {
 
     var demo = false;
     var json = false;
+    var noCache = false;
     String? term;
     String? relayUrl;
     String? workerUrl;
@@ -308,6 +326,7 @@ class CliArgs {
     bool? monitorExams;
     var resetBaseline = false;
     var monitorKind = 'all';
+    String? cacheCategory;
     String? date;
     int? week;
     String? icsPath;
@@ -377,6 +396,9 @@ class CliArgs {
         case '--json':
           rejectInlineBool();
           json = true;
+        case '--no-cache':
+          rejectInlineBool();
+          noCache = true;
         case '-h':
         case '--help':
           rejectInlineBool();
@@ -556,6 +578,17 @@ class CliArgs {
           }
           monitorKind = rawK;
           usedSubFlags.add('--kind');
+        case '--category':
+          final rawCat = takeValue(i, flagName, inlineValue, argv, () => i++)
+              .trim()
+              .toLowerCase();
+          if (!validCacheCategories.contains(rawCat)) {
+            throw CliUsageException(
+              '无效的 --category 缓存分类 "$rawCat"（可选值：catalog | schedule | grades | exams | progress | enrolled | classrooms | static）。',
+            );
+          }
+          cacheCategory = rawCat;
+          usedSubFlags.add('--category');
         case '--date':
           date = takeValue(i, flagName, inlineValue, argv, () => i++).trim();
           usedSubFlags.add('--date');
@@ -628,6 +661,7 @@ class CliArgs {
     final global = CliGlobalOptions(
       demo: demo,
       json: json,
+      noCache: noCache,
       term: term,
       relayUrl: relayUrl,
       workerUrl: workerUrl,
@@ -708,7 +742,7 @@ class CliArgs {
       case 'worker':
         if (positionals.length < 2) {
           throw const CliUsageException(
-            'worker 需要指定子命令：tasks | push-cookies | webhook | monitor。',
+            'worker 需要指定子命令：tasks | push-cookies | webhook | monitor | cache。',
           );
         }
         final group = positionals[1].toLowerCase();
@@ -795,9 +829,25 @@ class CliArgs {
                   '未知 worker monitor 子命令 "$action"（支持：status | set | check）。',
                 ),
             };
+          case 'cache':
+            final action = positionals.length >= 3
+                ? positionals[2].toLowerCase()
+                : 'status';
+            if (positionals.length > 3) {
+              throw CliUsageException(
+                'worker cache $action 不接受额外位置参数：${positionals.sublist(3).join(" ")}',
+              );
+            }
+            command = switch (action) {
+              'status' => CliCommandKind.workerCacheStatus,
+              'clear' => CliCommandKind.workerCacheClear,
+              _ => throw CliUsageException(
+                  '未知 worker cache 子命令 "$action"（支持：status | clear）。',
+                ),
+            };
           default:
             throw CliUsageException(
-              '未知 worker 子命令 "$group"（支持：tasks | push-cookies | webhook | monitor）。',
+              '未知 worker 子命令 "$group"（支持：tasks | push-cookies | webhook | monitor | cache）。',
             );
         }
       case 'today':
@@ -985,6 +1035,8 @@ class CliArgs {
       case CliCommandKind.workerWebhookClear:
       case CliCommandKind.workerMonitorStatus:
       case CliCommandKind.workerMonitorCheck:
+      case CliCommandKind.workerCacheStatus:
+      case CliCommandKind.workerCacheClear:
       case CliCommandKind.today:
       case CliCommandKind.schedule:
       case CliCommandKind.grades:
@@ -1034,6 +1086,7 @@ class CliArgs {
       monitorExams: monitorExams,
       resetBaseline: resetBaseline,
       monitorKind: monitorKind,
+      cacheCategory: cacheCategory,
       date: date,
       parsedDate: parsedDate,
       week: week,
@@ -1161,6 +1214,8 @@ class CliArgs {
           '--reset-baseline',
         },
       CliCommandKind.workerMonitorCheck => const <String>{'--kind'},
+      CliCommandKind.workerCacheStatus => const <String>{},
+      CliCommandKind.workerCacheClear => const <String>{'--category'},
       CliCommandKind.today => const <String>{'--date'},
       CliCommandKind.schedule => const <String>{'--week', '--ics'},
       CliCommandKind.grades => const <String>{'--stats'},

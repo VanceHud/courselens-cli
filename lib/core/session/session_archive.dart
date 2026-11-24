@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import '../port/http.dart';
 import '../port/storage.dart';
+import '../port/stored_load.dart';
 
 /// 一个已保存的账号元数据（不含密码与 API Key）。
 class SavedAccount {
@@ -139,7 +140,8 @@ class SessionArchive {
   String get _storeKey => 'sessions.v1.$_service';
 
   Future<bool> save(SavedAccount account, List<StoredCookie> cookies) async {
-    final blob = await _loadBlob();
+    final load = await _loadBlob();
+    final blob = load.value;
     final alreadyStored = blob.sessions.any((s) => s.account.key == account.key);
     if (!alreadyStored && blob.sessions.length >= maxAccounts) return false;
 
@@ -151,12 +153,15 @@ class SessionArchive {
       ...blob.sessions.where((s) => s.account.key != account.key),
       refreshed,
     ];
-    await _persistBlob(_ArchiveBlob(active: account.key, sessions: updated));
+    await _persistBlob(
+      load,
+      _ArchiveBlob(active: account.key, sessions: updated),
+    );
     return true;
   }
 
   Future<List<SavedAccount>> accounts() async {
-    final blob = await _loadBlob();
+    final blob = (await _loadBlob()).value;
     return blob.sessions.map((s) => s.account).toList(growable: false);
   }
 
@@ -165,7 +170,7 @@ class SessionArchive {
     String accountKey,
   ) async {
     final target = _compositeKey(schoolId, accountKey);
-    final blob = await _loadBlob();
+    final blob = (await _loadBlob()).value;
     for (final s in blob.sessions) {
       if (s.account.key == target) {
         return s.cookies;
@@ -175,7 +180,7 @@ class SessionArchive {
   }
 
   Future<SavedAccount?> activeAccount() async {
-    final blob = await _loadBlob();
+    final blob = (await _loadBlob()).value;
     for (final s in blob.sessions) {
       if (s.account.key == blob.active) {
         return s.account;
@@ -185,50 +190,66 @@ class SessionArchive {
   }
 
   Future<bool> setActive(String schoolId, String accountKey) async {
-    final blob = await _loadBlob();
+    final load = await _loadBlob();
+    final blob = load.value;
     final target = _compositeKey(schoolId, accountKey);
     if (!blob.sessions.any((s) => s.account.key == target)) return false;
-    await _persistBlob(_ArchiveBlob(active: target, sessions: blob.sessions));
+    await _persistBlob(
+      load,
+      _ArchiveBlob(active: target, sessions: blob.sessions),
+    );
     return true;
   }
 
   Future<void> remove(String schoolId, String accountKey) async {
-    final blob = await _loadBlob();
+    final load = await _loadBlob();
+    final blob = load.value;
     final target = _compositeKey(schoolId, accountKey);
     final remaining = blob.sessions
         .where((s) => s.account.key != target)
         .toList(growable: false);
     if (remaining.isEmpty) {
+      await backupCorruptSecureEntry(_store, _storeKey, load);
       await _store.delete(_storeKey);
       return;
     }
     final stillActive =
         blob.active == target ? remaining.first.account.key : blob.active;
     await _persistBlob(
+      load,
       _ArchiveBlob(active: stillActive, sessions: remaining),
     );
   }
 
-  Future<void> clear() => _store.delete(_storeKey);
+  Future<void> clear() async {
+    await _store.delete(_storeKey);
+    await _store.delete(corruptBackupKey(_storeKey));
+  }
 
   Future<int> count() async {
-    final blob = await _loadBlob();
+    final blob = (await _loadBlob()).value;
     return blob.sessions.length;
   }
 
-  Future<_ArchiveBlob> _loadBlob() async {
+  Future<StoredLoad<_ArchiveBlob>> _loadBlob() async {
     final bytes = await _store.get(_storeKey);
-    if (bytes == null) return const _ArchiveBlob();
-    try {
-      final decoded = jsonDecode(utf8.decode(bytes));
-      if (decoded is! Map) return const _ArchiveBlob();
-      return _ArchiveBlob.fromJson(Map<String, dynamic>.from(decoded));
-    } catch (_) {
-      return const _ArchiveBlob();
-    }
+    return decodeStoredJsonBytes<_ArchiveBlob>(
+      bytes,
+      empty: () => const _ArchiveBlob(),
+      parse: (decoded) {
+        if (decoded is! Map) {
+          throw const FormatException('会话归档顶层不是 JSON 对象');
+        }
+        return _ArchiveBlob.fromJson(Map<String, dynamic>.from(decoded));
+      },
+    );
   }
 
-  Future<void> _persistBlob(_ArchiveBlob blob) async {
+  Future<void> _persistBlob(
+    StoredLoad<_ArchiveBlob> previous,
+    _ArchiveBlob blob,
+  ) async {
+    await backupCorruptSecureEntry(_store, _storeKey, previous);
     final encoded = jsonEncode(blob.toJson());
     await _store.put(_storeKey, Uint8List.fromList(utf8.encode(encoded)));
   }
@@ -250,21 +271,23 @@ class _PersistedSession {
 
   factory _PersistedSession.fromJson(Map<String, dynamic> json) {
     final rawAccount = json['account'];
-    final account = rawAccount is Map
-        ? SavedAccount.fromJson(Map<String, dynamic>.from(rawAccount))
-        : const SavedAccount(
-            schoolId: '',
-            accountKey: '',
-            protocol: '',
-            baseUrl: '',
-          );
+    if (rawAccount is! Map) {
+      throw const FormatException('会话归档条目缺少 account 对象');
+    }
+    final account = SavedAccount.fromJson(
+      Map<String, dynamic>.from(rawAccount),
+    );
     final rawCookies = json['cookies'];
     final cookies = <StoredCookie>[];
-    if (rawCookies is List) {
+    if (rawCookies != null) {
+      if (rawCookies is! List) {
+        throw const FormatException('会话归档条目 cookies 字段不是数组');
+      }
       for (final item in rawCookies) {
-        if (item is Map) {
-          cookies.add(StoredCookie.fromJson(Map<String, dynamic>.from(item)));
+        if (item is! Map) {
+          throw const FormatException('会话归档 Cookie 条目不是 JSON 对象');
         }
+        cookies.add(StoredCookie.fromJson(Map<String, dynamic>.from(item)));
       }
     }
     return _PersistedSession(
@@ -291,13 +314,17 @@ class _ArchiveBlob {
   factory _ArchiveBlob.fromJson(Map<String, dynamic> json) {
     final rawSessions = json['sessions'];
     final sessions = <_PersistedSession>[];
-    if (rawSessions is List) {
+    if (rawSessions != null) {
+      if (rawSessions is! List) {
+        throw const FormatException('会话归档 sessions 字段不是数组');
+      }
       for (final item in rawSessions) {
-        if (item is Map) {
-          sessions.add(
-            _PersistedSession.fromJson(Map<String, dynamic>.from(item)),
-          );
+        if (item is! Map) {
+          throw const FormatException('会话归档条目不是 JSON 对象');
         }
+        sessions.add(
+          _PersistedSession.fromJson(Map<String, dynamic>.from(item)),
+        );
       }
     }
     return _ArchiveBlob(

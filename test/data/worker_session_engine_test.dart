@@ -169,7 +169,7 @@ void main() {
         client: client,
       );
       expect(info.authenticated, isTrue);
-      expect(info.systemId, equals('zf'));
+      expect(info.system, equals(AcademicSystem.ZF));
       expect(info.baseUrl, equals('https://jwglxt.qust.edu.cn/jwglxt'));
       expect(info.identity.name, equals('测试同学'));
       expect(info.identity.studentId, equals('2428050113'));
@@ -190,6 +190,20 @@ void main() {
           ),
         ),
       );
+    });
+
+    test('WorkerRemoteSessionInfo.fromJson parses systemId into AcademicSystem with AUTO fallback', () {
+      AcademicSystem parse(String? raw) => WorkerRemoteSessionInfo.fromJson(
+            <String, dynamic>{'systemId': ?raw},
+          ).system;
+
+      expect(parse('ZF'), AcademicSystem.ZF);
+      expect(parse('zf_old'), AcademicSystem.ZF_OLD);
+      expect(parse(' QZ '), AcademicSystem.QZ);
+      expect(parse('QZ_OLD'), AcademicSystem.QZ_OLD);
+      expect(parse(null), AcademicSystem.AUTO);
+      expect(parse(''), AcademicSystem.AUTO);
+      expect(parse('unknown'), AcademicSystem.AUTO);
     });
 
     test('execute strips Cookie/Set-Cookie, sends Bearer key, and enforces Redlines #3 and #4', () async {
@@ -597,6 +611,208 @@ void main() {
       expect(webhook.configured, isTrue);
       expect(webhook.hasSecret, isTrue);
       expect(webhook.maskedUrl, contains('••••'));
+    });
+
+    test('HttpCacheScope.runBypassingCache propagates bypassCache without leaking headers, and /v1/cache APIs parse stats & clear', () async {
+      expect(
+        WorkerSessionHttpEngine.normalizeWorkerBaseUrl(
+          'https://session.example.workers.dev/v1/cache',
+        ),
+        equals('https://session.example.workers.dev'),
+      );
+      expect(
+        WorkerSessionHttpEngine.normalizeWorkerBaseUrl(
+          'https://session.example.workers.dev/v1/selection',
+        ),
+        equals('https://session.example.workers.dev'),
+      );
+
+      final capturedProxyBodies = <Map<String, Object?>>[];
+      final capturedSelectionBodies = <Map<String, Object?>>[];
+      final seenControlCalls = <String>[];
+
+      final mockClient = MockClient((req) async {
+        if (req.url.path == '/v1/proxy' && req.method == 'POST') {
+          final body = jsonDecode(req.body) as Map<String, Object?>;
+          capturedProxyBodies.add(body);
+          return http.Response(
+            jsonEncode(<String, Object?>{
+              'ok': true,
+              'status': 200,
+              'finalUrl': body['url'],
+              'headers': const <String, List<String>>{
+                'content-type': <String>['application/json'],
+              },
+              'bodyBase64': base64Encode(utf8.encode('{"kbList":[]}')),
+            }),
+            200,
+            headers: const <String, String>{'content-type': 'application/json'},
+          );
+        }
+        if (req.url.path == '/v1/selection' && req.method == 'POST') {
+          final body = jsonDecode(req.body) as Map<String, Object?>;
+          capturedSelectionBodies.add(body);
+          return http.Response(
+            jsonEncode(<String, Object?>{
+              'ok': true,
+              'status': 200,
+              'finalUrl': body['url'],
+              'headers': const <String, List<String>>{
+                'content-type': <String>['application/json'],
+              },
+              'bodyBase64': base64Encode(utf8.encode('{"flag":"1"}')),
+            }),
+            200,
+            headers: const <String, String>{'content-type': 'application/json'},
+          );
+        }
+        if (req.url.path == '/v1/cache' && req.method == 'GET') {
+          seenControlCalls.add('GET ${req.url.path}');
+          return http.Response(
+            jsonEncode(<String, Object?>{
+              'ok': true,
+              'enabled': true,
+              'stats': const <String, Object?>{
+                'entryCount': 3,
+                'totalBytes': 4096,
+                'hits': 12,
+                'l1Hits': 9,
+                'l2Hits': 3,
+                'misses': 4,
+                'bypasses': 1,
+                'evictions': 0,
+              },
+              'categories': const <Map<String, Object?>>[
+                <String, Object?>{
+                  'category': 'schedule',
+                  'ttlSec': 1800,
+                  'activeEntries': 1,
+                  'bytes': 2048,
+                },
+                <String, Object?>{
+                  'category': 'grades',
+                  'ttlSec': 300,
+                  'activeEntries': 2,
+                  'bytes': 2048,
+                },
+              ],
+            }),
+            200,
+            headers: const <String, String>{'content-type': 'application/json'},
+          );
+        }
+        if (req.url.path == '/v1/cache' && req.method == 'DELETE') {
+          final query = req.url.query.isEmpty ? '' : '?${req.url.query}';
+          seenControlCalls.add('DELETE ${req.url.path}$query');
+          final isGrades = req.url.queryParameters['category'] == 'grades';
+          return http.Response(
+            jsonEncode(<String, Object?>{
+              'ok': true,
+              'clearedCount': isGrades ? 2 : 3,
+            }),
+            200,
+            headers: const <String, String>{'content-type': 'application/json'},
+          );
+        }
+        return http.Response('Not Found', 404);
+      });
+
+      const workerUrl = 'https://session.example.workers.dev';
+      const apiKey = 'cl_cache_test_key';
+      final engine = WorkerSessionHttpEngine(
+        workerBaseUrlProvider: () => workerUrl,
+        apiKeyProvider: () => apiKey,
+        client: mockClient,
+      );
+
+      final request = HttpRequest(
+        method: HttpMethod.post,
+        url: 'https://jwglxt.qust.edu.cn/jwglxt/kbcx/xskbcx_cxXsgrkb.html',
+        headers: const <String, String>{
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: Uint8List.fromList(utf8.encode('xnm=2026&xqm=3')),
+      );
+
+      // 1. Normal call omits bypassCache
+      expect(HttpCacheScope.isBypassCache, isFalse);
+      await engine.execute(request);
+      expect(capturedProxyBodies, hasLength(1));
+      expect(capturedProxyBodies.last.containsKey('bypassCache'), isFalse);
+
+      // 2. Scoped bypass call sets bypassCache: true without mutating upstream headers
+      await HttpCacheScope.runBypassingCache(() async {
+        expect(HttpCacheScope.isBypassCache, isTrue);
+        await engine.execute(request);
+      });
+      expect(HttpCacheScope.isBypassCache, isFalse);
+      expect(capturedProxyBodies, hasLength(2));
+      expect(capturedProxyBodies.last['bypassCache'], isTrue);
+      final forwardedHeaders =
+          capturedProxyBodies.last['headers'] as Map<String, Object?>;
+      expect(
+        forwardedHeaders.keys
+            .any((k) => k.toLowerCase().contains('courselens')),
+        isFalse,
+      );
+
+      // 3. confirmedSelection routes to /v1/selection with confirmed: true
+      await engine.execute(
+        HttpRequest(
+          method: HttpMethod.post,
+          url:
+              'https://jwglxt.qust.edu.cn/jwglxt/xsxk/zzxkyzbjk_xkBcZyZzxkYzb.html',
+          headers: const <String, String>{
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: Uint8List.fromList(utf8.encode('jxb_ids=JXB1')),
+          confirmedSelection: true,
+        ),
+      );
+      expect(capturedSelectionBodies, hasLength(1));
+      expect(capturedSelectionBodies.single['confirmed'], isTrue);
+
+      // 4. GET /v1/cache & DELETE /v1/cache
+      final stats = await WorkerSessionHttpEngine.fetchCacheStats(
+        workerBaseUrl: workerUrl,
+        apiKey: apiKey,
+        client: mockClient,
+      );
+      expect(stats.enabled, isTrue);
+      expect(stats.entryCount, equals(3));
+      expect(stats.totalBytes, equals(4096));
+      expect(stats.formattedSize, equals('4.0 KB'));
+      expect(stats.hits, equals(12));
+      expect(stats.l1Hits, equals(9));
+      expect(stats.l2Hits, equals(3));
+      expect(stats.misses, equals(4));
+      expect(stats.bypasses, equals(1));
+      expect(stats.categories, hasLength(2));
+      expect(stats.categories.first.category, equals('schedule'));
+      expect(stats.categories.first.ttlSec, equals(1800));
+
+      final clearedGrades = await WorkerSessionHttpEngine.clearRemoteCache(
+        workerBaseUrl: workerUrl,
+        apiKey: apiKey,
+        category: 'grades',
+        client: mockClient,
+      );
+      expect(clearedGrades, equals(2));
+
+      final clearedAll = await WorkerSessionHttpEngine.clearRemoteCache(
+        workerBaseUrl: workerUrl,
+        apiKey: apiKey,
+        client: mockClient,
+      );
+      expect(clearedAll, equals(3));
+      expect(
+        seenControlCalls,
+        equals(const <String>[
+          'GET /v1/cache',
+          'DELETE /v1/cache?category=grades',
+          'DELETE /v1/cache',
+        ]),
+      );
     });
   });
 }

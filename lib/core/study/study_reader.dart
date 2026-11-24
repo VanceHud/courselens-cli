@@ -22,7 +22,6 @@ import '../parse/urls.dart';
 import '../parse/xsxy_parser.dart';
 import '../parse/zhengfang_home.dart';
 import '../schedule/ics_export.dart';
-import '../schedule/period_schedule_builder.dart';
 import 'study_transport.dart';
 
 enum _Lookup {
@@ -72,13 +71,16 @@ class StudyReader {
   static const String defaultGradeGnmkdm = 'N305005';
   static const String subScoreGnmkdm = 'N305007';
 
+  /// 供 [StudyTransport] 使用的默认 Referer 路径：仅新正方回落到首页菜单，其他系统退回 origin。
+  static String? defaultRefererPathFor(AcademicSystem system) =>
+      system == AcademicSystem.ZF ? ZhengfangHomeParser.initMenuPath : null;
+
   static const int _rowsPerPage = 200;
   static const int _subScoreRowsPerPage = 300;
   static const int _pageLimit = 100;
   static const int _semesterAggregateLimit = 100;
   static const int _frameDepthLimit = 3;
 
-  static const String _zfInitMenuPath = 'xtgl/index_initMenu.html?jsdm=xs';
   static const String _primaryPersonalTimetablePath =
       'kbcx/xskbcx_cxXsgrkb.html';
   static const String _fallbackTimetablePath = 'kbcx/xskbcx_cxXsKb.html';
@@ -97,6 +99,8 @@ class StudyReader {
       'xsxy/xsxyqk_cxXsxyqkIndex.html?ver=new&gnmkdm=N105515&layout=default';
   static const String _zfAcademicProgressCoursesPath =
       'xsxy/xsxyqk_cxJxzxjhxfyqKcxx.html?gnmkdm=N105515';
+  static const String _zfEmptyClassroomIndexPath =
+      'cdjy/cdjy_cxKxcdlb.html?gnmkdm=N2155&layout=default';
   static const String _zfEmptyClassroomQueryPath =
       'cdjy/cdjy_cxKxcdlb.html?doType=query&gnmkdm=N2155';
   static const String _zfEnrolledCoursesQueryPath =
@@ -190,16 +194,18 @@ class StudyReader {
     var homeMeta =
         _transport.session.zfHomeMetadata ?? const ZhengfangHomeMetadata();
     if (homeMeta.isEmpty) {
-      try {
-        final menuPage = _verify(
-          await _transport.fetch(_transport.resolveUrl(_zfInitMenuPath)),
-        );
+      final menuPage = await _tryOptional(
+        () async => _verify(
+          await _transport.fetch(
+            _transport.resolveUrl(ZhengfangHomeParser.initMenuPath),
+          ),
+        ),
+      );
+      if (menuPage != null) {
         final parsed = ZhengfangHomeParser.parse(menuPage.body);
         if (!parsed.isEmpty) {
           homeMeta = parsed.merge(homeMeta);
         }
-      } on AcademicException catch (e) {
-        if (e.status == AcademicStatus.SESSION_EXPIRED) rethrow;
       }
     }
 
@@ -238,12 +244,9 @@ class StudyReader {
     if (homeMeta.currentTerm != null) {
       active = homeMeta.currentTerm!;
     } else {
-      FetchedPage? legacyPage;
-      try {
-        legacyPage = _verify(await _transport.fetch(_fallbackTimetableUrl()));
-      } on AcademicException catch (e) {
-        if (e.status == AcademicStatus.SESSION_EXPIRED) rethrow;
-      }
+      final legacyPage = await _tryOptional(
+        () async => _verify(await _transport.fetch(_fallbackTimetableUrl())),
+      );
       if (legacyPage != null) {
         final selected = GradesHtml.selectedTerm(legacyPage.body);
         active = selected != null
@@ -278,24 +281,20 @@ class StudyReader {
 
   Future<ZhengfangHomeMetadata?> _fetchOptionalZfHomeArea(
     String relativePath,
-  ) async {
-    try {
-      final page = _verify(
-        await _transport.submitForm(
-          _transport.resolveUrl(relativePath),
-          const <(String, String)>[],
-          referer: _transport.resolveUrl(_zfInitMenuPath),
-          ajax: true,
-        ),
-      );
-      if (page.status < 200 || page.status > 299) return null;
-      final parsed = ZhengfangHomeParser.parse(page.body);
-      return parsed.isEmpty ? null : parsed;
-    } on AcademicException catch (e) {
-      if (e.status == AcademicStatus.SESSION_EXPIRED) rethrow;
-      return null;
-    }
-  }
+  ) =>
+      _tryOptional(() async {
+        final page = _verify(
+          await _transport.submitForm(
+            _transport.resolveUrl(relativePath),
+            const <(String, String)>[],
+            referer: _transport.resolveUrl(ZhengfangHomeParser.initMenuPath),
+            ajax: true,
+          ),
+        );
+        if (page.status < 200 || page.status > 299) return null;
+        final parsed = ZhengfangHomeParser.parse(page.body);
+        return parsed.isEmpty ? null : parsed;
+      });
 
   int _inferEnrollmentYear(int activeYear) {
     final id = _effectiveStudentId;
@@ -386,7 +385,7 @@ class StudyReader {
       'kzlx': 'ck',
       'xsdm': '',
     };
-    try {
+    final primary = await _tryOptional(() async {
       final answer = _verify(
         await _transport.submitForm(
           _zfUrlWithParams(
@@ -406,9 +405,8 @@ class StudyReader {
               termId: term.id,
             )
           : parsed;
-    } on AcademicException catch (e) {
-      if (e.status == AcademicStatus.SESSION_EXPIRED) rethrow;
-    }
+    });
+    if (primary != null) return primary;
 
     final fallbackFields = _zfTermFields(term)
         .entries
@@ -455,11 +453,7 @@ class StudyReader {
         ajax: true,
       ),
     );
-    final parsed = StudyJson.bellSchedule(answer.body);
-    if (parsed.isNotEmpty) return parsed;
-    return campusId.trim() == '3'
-        ? PeriodScheduleBuilder.qustGaomiPreset()
-        : PeriodScheduleBuilder.qustSifangLaoshanPreset();
+    return StudyJson.bellSchedule(answer.body);
   }
 
   Future<List<ScheduleEntry>> _qzTimetable(AcademicTerm term) async {
@@ -501,15 +495,14 @@ class StudyReader {
 
     // 非致命单次批量抓取全学期成绩分项（平时/作业/实验/期末），按 jxb_id 自动挂载。
     if (entries.isNotEmpty) {
+      // 离线最小夹具或部分未开放 N305007 的学校安全忽略；格式异常亦不影响主成绩。
       try {
-        final subRows = await _fetchBulkSubScoreRows();
-        if (subRows.isNotEmpty) {
+        final subRows = await _tryOptional(_fetchBulkSubScoreRows);
+        if (subRows != null && subRows.isNotEmpty) {
           entries = StudyJson.attachSubItems(entries, subRows);
         }
-      } on AcademicException catch (e) {
-        if (e.status == AcademicStatus.SESSION_EXPIRED) rethrow;
-      } catch (_) {
-        // 离线最小夹具或部分未开放 N305007 的学校安全忽略。
+      } on FormatException {
+        // 分项响应格式异常时保留主成绩。
       }
     }
 
@@ -550,11 +543,8 @@ class StudyReader {
       _primaryPersonalScorePath,
       {'doType': 'query', 'gnmkdm': _gradeGnmkdm},
     );
-    try {
-      return await queryAt(primaryUrl);
-    } on AcademicException catch (e) {
-      if (e.status == AcademicStatus.SESSION_EXPIRED) rethrow;
-    }
+    final primary = await _tryOptional(() => queryAt(primaryUrl));
+    if (primary != null) return primary;
 
     final fallbackUrl = _zfUrlWithParams(
       _fallbackScorePath,
@@ -600,7 +590,7 @@ class StudyReader {
     final term = normalizedTerm != null ? AcademicTerm(normalizedTerm) : null;
     final termFields = _zfTermFields(term);
 
-    try {
+    final listed = await _tryOptional(() async {
       final page = _verify(
         await _transport.submitForm(
           _zfUrlWithParams(_courseSubScorePath, {'gnmkdm': subScoreGnmkdm}),
@@ -613,14 +603,12 @@ class StudyReader {
           ajax: true,
         ),
       );
-      final parsed = StudyJson.parseSubItems(page.body);
-      if (parsed.isNotEmpty) return parsed;
-    } on AcademicException catch (e) {
-      if (e.status == AcademicStatus.SESSION_EXPIRED) rethrow;
-    }
+      return StudyJson.parseSubItems(page.body);
+    });
+    if (listed != null && listed.isNotEmpty) return listed;
 
-    try {
-      final modal = _verify(
+    final modal = await _tryOptional(() async {
+      final page = _verify(
         await _transport.submitForm(
           _zfUrlWithParams(_courseSubScoreModalPath, {'gnmkdm': _gradeGnmkdm}),
           <String, String>{
@@ -631,11 +619,9 @@ class StudyReader {
           ajax: true,
         ),
       );
-      final parsed = StudyJson.parseSubItems(modal.body);
-      if (parsed.isNotEmpty) return parsed;
-    } on AcademicException catch (e) {
-      if (e.status == AcademicStatus.SESSION_EXPIRED) rethrow;
-    }
+      return StudyJson.parseSubItems(page.body);
+    });
+    if (modal != null && modal.isNotEmpty) return modal;
 
     return entry.subItems;
   }
@@ -771,6 +757,33 @@ class StudyReader {
     return XsxyParser.parsePlanCourses(page.body);
   }
 
+  /// 动态读取空教室筛选元数据（本校校区与场地类别，新正方 `GET cdjy/cdjy_cxKxcdlb.html?gnmkdm=N2155&layout=default`）。
+  Future<EmptyClassroomFilterOptions> emptyClassroomFilters() async {
+    if (_system != AcademicSystem.ZF) {
+      return EmptyClassroomFilterOptions();
+    }
+    final cached = _transport.session.cachedClassroomFilters;
+    if (cached != null) return cached;
+    final EmptyClassroomFilterOptions? parsed;
+    try {
+      parsed = await _tryOptional(() async {
+        final page = _verify(
+          await _transport.fetch(
+            _transport.resolveUrl(_zfEmptyClassroomIndexPath),
+          ),
+        );
+        return StudyHtml.emptyClassroomFilters(page.body);
+      });
+    } on FormatException {
+      return EmptyClassroomFilterOptions();
+    }
+    if (parsed == null) return EmptyClassroomFilterOptions();
+    if (!parsed.isEmpty) {
+      _transport.session.cachedClassroomFilters = parsed;
+    }
+    return parsed;
+  }
+
   /// 空教室查询（新正方 `POST cdjy/cdjy_cxKxcdlb.html?doType=query&gnmkdm=N2155`）。
   Future<List<EmptyClassroom>> emptyClassrooms(
     EmptyClassroomQuery query,
@@ -783,7 +796,7 @@ class StudyReader {
 
     final params = <String, String>{
       'fwzt': 'cx',
-      'xqh_id': query.campusId.trim().isEmpty ? '1' : query.campusId.trim(),
+      'xqh_id': query.campusId.trim(),
       'xnm': termFields['xnm'] ?? '',
       'xqm': termFields['xqm'] ?? '',
       'cdlb_id': query.roomTypeId.trim(),
@@ -1233,6 +1246,17 @@ class StudyReader {
     if (common != null) return common;
     if (_system == AcademicSystem.ZF) return null;
     return AcademicJson.integer(root, const ['total']);
+  }
+
+  /// 可选端点：除 [AcademicStatus.SESSION_EXPIRED] 外的 [AcademicException]
+  /// 一律视为不可用并返回 null，由调用方回退；登录失效继续上抛。
+  static Future<T?> _tryOptional<T>(Future<T?> Function() op) async {
+    try {
+      return await op();
+    } on AcademicException catch (e) {
+      if (e.status == AcademicStatus.SESSION_EXPIRED) rethrow;
+      return null;
+    }
   }
 
   static FetchedPage _verify(FetchedPage page) {

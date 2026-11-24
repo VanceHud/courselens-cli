@@ -1,4 +1,5 @@
 import '../model/schedule.dart';
+import 'clock_text.dart';
 import 'ics_export.dart';
 
 /// 大课间：特定两节之间的课间时长覆盖（替换普通课间时长）。
@@ -54,6 +55,54 @@ class PeriodScheduleBuilder {
   static const int _minutesPerDay = 24 * 60;
   static const int _maxOverrideBreak = 4 * 60;
 
+  /// 通用高校早八 12 节标准作息规格（08:00 起，45 分钟/节，含 2/6 节大课间）。
+  static const PeriodScheduleSpec standard12Spec = PeriodScheduleSpec(
+    firstStart: '08:00',
+    lessonMinutes: 45,
+    breakMinutes: 10,
+    morningPeriods: 4,
+    noonBreakMinutes: 120,
+    afternoonPeriods: 4,
+    eveningBreakMinutes: 90,
+    periodCount: 12,
+    breakOverrides: <PeriodBreakOverride>[
+      PeriodBreakOverride(afterPeriod: 2, breakMinutes: 20),
+      PeriodBreakOverride(afterPeriod: 6, breakMinutes: 20),
+    ],
+  );
+
+  /// 通用高校 08:30 起 12 节作息规格（45 分钟/节，含 2/6 节大课间）。
+  static const PeriodScheduleSpec morning830Spec = PeriodScheduleSpec(
+    firstStart: '08:30',
+    lessonMinutes: 45,
+    breakMinutes: 10,
+    morningPeriods: 4,
+    noonBreakMinutes: 100,
+    afternoonPeriods: 4,
+    eveningBreakMinutes: 70,
+    periodCount: 12,
+    breakOverrides: <PeriodBreakOverride>[
+      PeriodBreakOverride(afterPeriod: 2, breakMinutes: 20),
+      PeriodBreakOverride(afterPeriod: 6, breakMinutes: 20),
+    ],
+  );
+
+  /// 通用高校早八 11 节紧凑作息规格（08:00 起，45 分钟/节，晚间 3 节）。
+  static const PeriodScheduleSpec standard11Spec = PeriodScheduleSpec(
+    firstStart: '08:00',
+    lessonMinutes: 45,
+    breakMinutes: 10,
+    morningPeriods: 4,
+    noonBreakMinutes: 100,
+    afternoonPeriods: 4,
+    eveningBreakMinutes: 40,
+    periodCount: 11,
+    breakOverrides: <PeriodBreakOverride>[
+      PeriodBreakOverride(afterPeriod: 2, breakMinutes: 20),
+      PeriodBreakOverride(afterPeriod: 6, breakMinutes: 20),
+    ],
+  );
+
   /// 青岛科技大学四方校区（`xqh_id=1`）与崂山校区（`xqh_id=2`）官方 11 节作息规格。
   static const PeriodScheduleSpec qustSifangLaoshanSpec = PeriodScheduleSpec(
     firstStart: '08:00',
@@ -86,6 +135,15 @@ class PeriodScheduleBuilder {
     ],
   );
 
+  /// 通用高校早八 12 节作息表。
+  static List<PeriodTime> standard12Preset() => build(standard12Spec);
+
+  /// 通用高校 08:30 起 12 节作息表。
+  static List<PeriodTime> morning830Preset() => build(morning830Spec);
+
+  /// 通用高校早八 11 节作息表。
+  static List<PeriodTime> standard11Preset() => build(standard11Spec);
+
   /// 青岛科技大学四方 / 崂山校区 11 节标准作息表（`08:00-08:45` .. `19:50-20:35`）。
   static List<PeriodTime> qustSifangLaoshanPreset() =>
       build(qustSifangLaoshanSpec);
@@ -94,7 +152,7 @@ class PeriodScheduleBuilder {
   static List<PeriodTime> qustGaomiPreset() => build(qustGaomiSpec);
 
   static List<PeriodTime> build(PeriodScheduleSpec spec) {
-    final first = _parseClock(spec.firstStart);
+    final first = ClockText.parseMinutes(spec.firstStart);
     if (first == null) return const <PeriodTime>[];
 
     final lesson = spec.lessonMinutes.clamp(1, 180);
@@ -133,18 +191,6 @@ class PeriodScheduleBuilder {
       cursor += lesson + (overrides[period] ?? shortBreak);
     }
     return result;
-  }
-
-  static int? _parseClock(String value) {
-    final parts = value.split(':');
-    if (parts.length != 2 || parts[0].length != 2 || parts[1].length != 2) {
-      return null;
-    }
-    final hour = int.tryParse(parts[0]);
-    final minute = int.tryParse(parts[1]);
-    if (hour == null || minute == null) return null;
-    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
-    return hour * 60 + minute;
   }
 
   static String _formatClock(int minutes) {

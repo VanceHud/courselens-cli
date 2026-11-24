@@ -4,81 +4,34 @@ import 'dart:io';
 import 'package:courselens/cli/store/cli_session_store.dart';
 import 'package:test/test.dart';
 
-class _FakeKeychainBackend {
-  final List<List<String>> invocations = <List<String>>[];
+class _FakeKeychainBackend implements CliKeychain {
   final Map<String, String> items = <String, String>{};
-  int? forcedExitCode;
-  String forcedStderr = '';
-  Object? thrownError;
-  bool returnHexOnFind = false;
+  bool unavailable = false;
 
-  Future<ProcessResult> run(String executable, List<String> args) async {
-    expect(executable, KeychainCliSessionStore.securityExecutable);
-    invocations.add(List<String>.unmodifiable(args));
-
-    if (thrownError != null) {
-      // ignore: only_throw_errors
-      throw thrownError!;
-    }
-    if (forcedExitCode != null) {
-      return ProcessResult(1, forcedExitCode!, '', forcedStderr);
-    }
-
-    final subcommand = args.first;
-    final service = _argAfter(args, '-s') ?? '';
-    final account = _argAfter(args, '-a') ?? '';
-    final key = '$service|$account';
-
-    switch (subcommand) {
-      case 'find-generic-password':
-        final secret = items[key];
-        if (secret == null) {
-          return ProcessResult(
-            1,
-            44,
-            '',
-            'security: SecKeychainSearchCopyNext: '
-                'The specified item could not be found in the keychain.',
-          );
-        }
-        if (returnHexOnFind) {
-          final hex = utf8
-              .encode(secret)
-              .map((b) => b.toRadixString(16).padLeft(2, '0'))
-              .join();
-          return ProcessResult(1, 0, '$hex\n', '');
-        }
-        return ProcessResult(1, 0, '$secret\n', '');
-
-      case 'add-generic-password':
-        expect(args, contains('-U'));
-        final secret = _argAfter(args, '-w');
-        expect(secret, isNotNull);
-        items[key] = secret!;
-        return ProcessResult(1, 0, '', '');
-
-      case 'delete-generic-password':
-        final existed = items.remove(key) != null;
-        if (!existed) {
-          return ProcessResult(
-            1,
-            44,
-            '',
-            'security: SecKeychainSearchCopyNext: '
-                'The specified item could not be found in the keychain.',
-          );
-        }
-        return ProcessResult(1, 0, '', '');
-
-      default:
-        return ProcessResult(1, 2, '', 'Unknown subcommand $subcommand');
+  void check() {
+    if (unavailable) {
+      throw const CliStorageUnavailableException(
+        'User interaction is not allowed',
+      );
     }
   }
 
-  static String? _argAfter(List<String> args, String flag) {
-    final idx = args.indexOf(flag);
-    if (idx < 0 || idx + 1 >= args.length) return null;
-    return args[idx + 1];
+  @override
+  String? read(String service, String account) {
+    check();
+    return items['$service|$account'];
+  }
+
+  @override
+  void write(String service, String account, String value) {
+    check();
+    items['$service|$account'] = value;
+  }
+
+  @override
+  void delete(String service, String account) {
+    check();
+    items.remove('$service|$account');
   }
 }
 
@@ -301,14 +254,14 @@ void main() {
     });
   });
 
-  group('KeychainCliSessionStore (mocked security + Redline #1)', () {
-    test('saves, loads (including Unicode & hex), and clears Keychain item',
+  group('KeychainCliSessionStore (mocked Keychain + Redline #1)', () {
+    test('saves, loads (including Unicode), and clears Keychain item',
         () async {
       final fake = _FakeKeychainBackend();
       final store = CliCredentialStore.resolve(
         kind: CliStoreKind.keychain,
         operatingSystem: 'macos',
-        processRunner: fake.run,
+        keychain: fake,
       );
 
       // Missing item returns null, clear on missing item is idempotent.
@@ -327,13 +280,7 @@ void main() {
       final savedKey =
           '${CliCredentialStore.defaultKeychainService}|${CliCredentialStore.defaultKeychainAccount}';
       expect(fake.items.containsKey(savedKey), isTrue);
-      // Stored payload must be pure printable ASCII JSON so `security -w` never mangles it.
-      final rawStored = fake.items[savedKey]!;
-      expect(rawStored.startsWith('{'), isTrue);
-      expect(
-        rawStored.codeUnits.every((c) => c >= 0x20 && c <= 0x7E),
-        isTrue,
-      );
+      expect(fake.items[savedKey], contains('演示同学_2401'));
 
       final loaded = await store.load();
       expect(loaded, isNotNull);
@@ -341,11 +288,10 @@ void main() {
       expect(loaded.cookies, const <String, String>{'JSESSIONID': 'KC_999'});
       expect(loaded.backendName, 'keychain');
 
-      // Also decode hex output when `security -w` emits hex bytes.
-      fake.returnHexOnFind = true;
-      final loadedFromHex = await store.load();
-      expect(loadedFromHex, isNotNull);
-      expect(loadedFromHex!.username, '演示同学_2401');
+      // Legacy ASCII-escaped JSON remains readable as the same Keychain item.
+      final stored = fake.items[savedKey]!;
+      fake.items[savedKey] = stored.replaceAll('演', r'演');
+      expect((await store.load())!.username, '演示同学_2401');
 
       await store.clear();
       expect(await store.load(), isNull);
@@ -361,16 +307,13 @@ void main() {
         }
       });
 
-      final fake = _FakeKeychainBackend()
-        ..forcedExitCode = 36
-        ..forcedStderr =
-            'security: SecKeychainItemCopyContent: User interaction is not allowed.';
+      final fake = _FakeKeychainBackend()..unavailable = true;
 
       final store = CliCredentialStore.resolve(
         kind: CliStoreKind.auto,
         operatingSystem: 'macos',
         environment: <String, String>{'HOME': tempHome.path},
-        processRunner: fake.run,
+        keychain: fake,
       );
       expect(store, isA<KeychainCliSessionStore>());
 
@@ -402,25 +345,23 @@ void main() {
       );
 
       // Verify zero silent fallback files were created under $HOME/.config.
-      final fallbackFile =
-          File('${tempHome.path}/.config/courselens/session.json');
+      final fallbackFile = File(
+        '${tempHome.path}/.config/courselens/session.json',
+      );
       expect(await fallbackFile.exists(), isFalse);
 
-      // Process launch failure also maps to CliStorageUnavailableException.
-      final brokenStore = KeychainCliSessionStore(
-        operatingSystem: 'macos',
-        processRunner: (_, _) async =>
-            throw const ProcessException('/usr/bin/security', <String>[]),
-      );
+      // Invalid persisted payload is rejected.
+      fake.unavailable = false;
+      fake.items['dev.courselens.cli|default'] = 'invalid';
       await expectLater(
-        brokenStore.load(),
+        store.load(),
         throwsA(isA<CliStorageUnavailableException>()),
       );
 
       // Non-macOS invocation of Keychain store fails closed.
       final linuxKeychain = KeychainCliSessionStore(
         operatingSystem: 'linux',
-        processRunner: fake.run,
+        keychain: fake,
       );
       await expectLater(
         linuxKeychain.load(),

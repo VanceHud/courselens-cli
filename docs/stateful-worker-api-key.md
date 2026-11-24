@@ -89,7 +89,7 @@ npx wrangler deploy
 
 ```bash
 curl -s https://courselens-session.<your-subdomain>.workers.dev/health
-# {"ok":true,"service":"courselens-session-gateway","mode":"stateful-worker","version":"1.1.0"}
+# {"ok":true,"service":"courselens-session-gateway","mode":"stateful-worker","version":"1.1.8"}
 ```
 
 ### 3.3 本地开发与离线单元测试
@@ -120,6 +120,8 @@ npm run dev
 | `ALLOWED_HOSTS` | 可选 | 额外允许转发的教务主机白名单（逗号分隔；`PORTAL_URL` 与 `PORTAL_CAS_URL` 所在源已自动放行） |
 | `KEEPALIVE_INTERVAL_SEC` | 可选 | 后台定时心跳秒数（默认 `0` = **按需懒保活**，空闲零唤醒；仅纯种子 Cookie 需定时续期时设为如 `900`） |
 | `SESSION_VERIFY_TTL_SEC` | 可选 | `GET /v1/session` 在线探活结果复用秒数（默认 `120`，减少重复探测上游） |
+| `PROXY_CACHE_ENABLED` | 可选 | 是否启用 `/v1/proxy` 只读教务查询双层缓存（DO 内存 + AES-256-GCM 加密 SQLite，默认 `true`；设为 `false` 可全局关闭；选课/退课/余量/登录/验证码永不缓存） |
+| `CACHE_TTL_*_SEC` | 可选 | 按数据分类独立覆写代理缓存有效期（秒，设为 `0` 关闭该类缓存）：`CACHE_TTL_CATALOG_SEC`（默认 `1800`）、`CACHE_TTL_SCHEDULE_SEC`（`1800`）、`CACHE_TTL_GRADES_SEC`（`300`）、`CACHE_TTL_EXAMS_SEC`（`600`）、`CACHE_TTL_PROGRESS_SEC`（`3600`）、`CACHE_TTL_ENROLLED_SEC`（`600`）、`CACHE_TTL_CLASSROOMS_SEC`（`120`）、`CACHE_TTL_STATIC_SEC`（`86400`） |
 | `CORS_ORIGIN` | 可选 | 允许跨域访问的浏览器来源（默认 `*`） |
 
 ---
@@ -140,10 +142,12 @@ printf '%s\n' "$MY_WORKER_KEY" | courselens auth worker \
   --url https://courselens-session.<your-subdomain>.workers.dev \
   --api-key-stdin
 
-# 2. 直接执行任意查询、云端监控管理或两步确认选退课
+# 2. 直接执行任意查询、云端监控/缓存管理或两步确认选退课
 courselens whoami
 courselens today
-courselens grades --stats
+courselens --no-cache grades --stats        # 穿透代理缓存，强制回源刷新
+courselens worker cache status              # 查看双层代理缓存命中统计与分类 TTL
+courselens worker cache clear --category grades
 courselens worker monitor status
 courselens select --course-id <id>          # 干跑预检（退出码 2，零写发包）
 ```
@@ -152,7 +156,7 @@ courselens select --course-id <id>          # 干跑预检（退出码 2，零�
 
 ### 方式 B：零落盘环境变量模式（推荐 AI Agent / 容器 / 自动化脚本）
 
-无需执行 `auth worker`、也无需配置 `COURSELENS_BASE_URL`——直接注入 `COURSELENS_WORKER_URL` 与 `COURSELENS_API_KEY` 即可零磁盘落盘运行：
+无需执行 `auth worker`、也无需配置 `COURSELENS_BASE_URL`——直接注入配对的 `COURSELENS_WORKER_URL` 与 `COURSELENS_API_KEY` 即可零磁盘落盘运行（安全策略要求 `COURSELENS_API_KEY` 仅对与之配对的 `COURSELENS_WORKER_URL` 生效）：
 
 ```bash
 export COURSELENS_WORKER_URL="https://courselens-session.<your-subdomain>.workers.dev"
@@ -170,12 +174,14 @@ courselens exams --json
 
 | 方法与路径 | 说明 |
 | --- | --- |
-| `GET /health` | 公开探活，返回 `{"ok":true,"service":"courselens-session-gateway","mode":"stateful-worker","version":"1.1.0"}` |
-| `GET /v1/session[?offline=1]` | 确保云端教务会话在线（必要时单飞自动登录），返回脱敏后的 `baseUrl`、`systemId`、`username`、`studentInfo` 与更新时间（不含任何密码或原始 Cookie 值） |
-| `POST /v1/session/refresh` | 强制重新执行一次教务登录或探活并更新 Durable Object 中的 `CookieJar` |
-| `POST /v1/session/cookies` | 动态推送扫码 / SSO 登录后的 Cookie 至云端 Durable Object 并在线核验存活 |
-| `DELETE /v1/session` | 显式销毁云端 Durable Object 中缓存的教务 Cookie 会话并取消后台保活 |
-| `POST /v1/proxy` | 由 `WorkerSessionHttpEngine` 调用的受控代理端点：自动附带云端 Cookie 访问白名单内的教务 URL，遇到会话过期时单飞自动重登并透明重放一次，返回 Base64 响应体供客户端 `lib/core/` 解析 |
+| `GET /health` | 公开探活，返回 `{"ok":true,"service":"courselens-session-gateway","mode":"stateful-worker","version":"1.1.8"}` |
+| `GET /v1/session[?offline=1\|probe=1]` | 确保云端教务会话在线（窗口内免重复探活，`?probe=1` 强制在线核验，必要时单飞自动重登），返回脱敏后的 `baseUrl`、`systemId`、`username`、`studentInfo` 与更新时间；若已存 Cookie/Webhook 密文因密钥轮换或损坏无法解密，`unreadableVault` 会给出 `reason` 与 `detectedAt`，原密文保留在 `v1:*:unreadable`（显式 `DELETE` 时清除） |
+| `POST /v1/session/refresh` | 强制重新执行一次教务登录或探活并更新 Durable Object 中的 `CookieJar`（同时清空旧代理缓存） |
+| `POST /v1/session/cookies` | 动态推送扫码 / SSO 登录后的 Cookie 至云端 Durable Object 并在线核验存活（自动隔离并清空旧代理缓存） |
+| `DELETE /v1/session` | 显式销毁云端 Durable Object 中缓存的教务 Cookie 会话、代理缓存与不可读备份并取消后台保活 |
+| `POST /v1/proxy` | 转发已知只读教务查询，按会话隔离双层加密缓存；会话过期时单飞重登并透明重放查询；`bypassCache: true`（CLI `--no-cache`）可强制回源刷新 |
+| `POST /v1/selection` | 转发显式确认的正方选课或退课 POST 写请求，须包含 `confirmed: true`；成功或返回 `RESULT_UNKNOWN` 时自动失效课表/已选/培养方案缓存 |
+| `GET \| DELETE /v1/cache[?category=...]` | 查看代理缓存命中统计与各数据分类活跃条目数（不含业务正文），或清空全量/指定分类代理缓存 |
 | `GET \| PATCH \| DELETE /v1/tasks[/:taskId]`<br>`POST /v1/tasks/:taskId/run` | 统一云端任务中心：查看、独立启停或立即运行 `monitor:grades`、`monitor:exams`、`session:keepalive`（默认全部关闭） |
-| `GET \| PATCH /v1/monitor`<br>`POST /v1/monitor/check` | 查看或修改成绩/考试变动定时巡检配置、重置指纹基线，或手动触发一次巡检 |
+| `GET \| PATCH /v1/monitor`<br>`POST /v1/monitor/check` | 查看或修改成绩/考试变动定时巡检配置、重置指纹基线，或手动触发一次巡检（检测到变动自动失效对应分类缓存） |
 | `GET \| PUT \| DELETE /v1/webhook`<br>`POST /v1/webhook/test` | 配置或测试 Bark / 飞书 / 钉钉 / 企业微信 / Telegram / 通用 HMAC-SHA256 Webhook 通知（URL 自动脱敏回显、密钥加密落盘） |

@@ -7,7 +7,9 @@
  * - `POST` `/v1/session/refresh`             -> Force re-login on portal (API Key required);
  * - `POST` `/v1/session/cookies`             -> Inject dynamically captured SSO/QR cookies into Vault (API Key required);
  * - `DELETE` `/v1/session`                   -> Clear cached portal cookies in Durable Object (API Key required);
- * - `POST` `/v1/proxy`                       -> Stateful portal HTTP proxy with server-injected CookieJar & auto-relogin (API Key required);
+ * - `POST` `/v1/proxy`                       -> Stateful portal HTTP proxy with server-injected CookieJar, auto-relogin & dual-layer read cache (API Key required);
+ * - `POST` `/v1/selection`                   -> Explicitly confirmed course selection/drop write proxy (API Key + confirmed=true required);
+ * - `GET|DELETE` `/v1/cache`                 -> Inspect proxy cache stats or clear all/category cached entries (API Key required);
  * - `GET` `/v1/tasks`                        -> List all cloud background tasks & switch states (API Key required);
  * - `GET|PATCH|PUT|DELETE` `/v1/tasks/:id`   -> Inspect task detail/logs, toggle task switch, or remove/reset task (API Key required);
  * - `POST` `/v1/tasks/:id/run`               -> Trigger immediate task execution (write tasks require confirmed=true);
@@ -20,7 +22,7 @@ import { PortalSessionVault } from "./session_vault.js";
 export { PortalSessionVault };
 
 // 网关版本号：与 CLI 版本保持一致（Dart 侧 CliUpdater.gatewayVersion 同步）。
-const GATEWAY_VERSION = "1.1.0";
+const GATEWAY_VERSION = "1.1.8";
 
 const FORBIDDEN_PLACEHOLDER_KEYS = new Set([
   "cl_sk_replace_with_32_bytes_random_hex",
@@ -170,7 +172,10 @@ function buildResponseHeaders(cors) {
   const headers = {
     ...BASE_SECURITY_HEADERS,
     "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-CourseLens-Key",
+    "Access-Control-Allow-Headers":
+      "Content-Type, Authorization, X-CourseLens-Key, X-CourseLens-Cache",
+    "Access-Control-Expose-Headers":
+      "X-CourseLens-Cache, X-CourseLens-Cache-Category, X-CourseLens-Cache-Age",
   };
   if (cors.allowOrigin) {
     headers["Access-Control-Allow-Origin"] = cors.allowOrigin;

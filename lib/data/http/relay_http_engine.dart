@@ -1,11 +1,12 @@
 import 'dart:async';
 import 'dart:convert' hide Base64Codec;
-import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
 import '../../core/courselens_core.dart';
+import 'gateway_response_decoder.dart';
 import 'http_policy_provider.dart';
+import 'uncertain_write.dart';
 
 /// 无状态 Web 转发网关健康探测结果。
 class RelayHealthStatus {
@@ -225,6 +226,7 @@ class RelayHttpEngine implements HttpEngine {
       'requireSecure': policy.requireSecure,
     };
 
+    final writeMayHaveCommitted = request.method == HttpMethod.post;
     final http.Response raw;
     try {
       raw = await _client
@@ -235,60 +237,26 @@ class RelayHttpEngine implements HttpEngine {
           )
           .timeout(timeout);
     } on TimeoutException {
-      final status = request.method == HttpMethod.post
-          ? AcademicStatus.RESULT_UNKNOWN
-          : AcademicStatus.NETWORK_RETRYABLE;
       throw AcademicException(
-        status,
+        uncertainWriteStatus(mayHaveCommitted: writeMayHaveCommitted),
         '连接 Web 转发网关超时，请检查网关是否在线',
       );
     } catch (error) {
       throw AcademicException(
-        AcademicStatus.NETWORK_RETRYABLE,
+        uncertainWriteStatus(mayHaveCommitted: writeMayHaveCommitted),
         '无法连接 Web 转发网关：$error',
       );
     }
 
-    Map<String, dynamic> decoded;
-    try {
-      decoded = jsonDecode(utf8.decode(raw.bodyBytes)) as Map<String, dynamic>;
-    } catch (_) {
-      throw AcademicException(
-        AcademicStatus.NETWORK_RETRYABLE,
-        'Web 转发网关返回了非预期响应（HTTP ${raw.statusCode}）',
-      );
-    }
-
-    if (raw.statusCode >= 400 && decoded['error'] is String) {
-      final code = decoded['status'] as String? ?? '';
-      final mapped = switch (code) {
-        'UNTRUSTED_URL' => AcademicStatus.UNTRUSTED_URL,
-        'RESULT_UNKNOWN' => AcademicStatus.RESULT_UNKNOWN,
-        _ => AcademicStatus.NETWORK_RETRYABLE,
-      };
-      throw AcademicException(mapped, decoded['error'] as String);
-    }
+    final decoded = _gatewayDecoder.decodeOrThrow(
+      raw,
+      mayHaveCommitted: writeMayHaveCommitted,
+    );
 
     final status = (decoded['status'] as num?)?.toInt() ?? raw.statusCode;
     final finalUrl = decoded['finalUrl'] as String? ?? request.url;
-    final headers = <String, List<String>>{};
-    final rawHeaders = decoded['headers'];
-    if (rawHeaders is Map) {
-      for (final entry in rawHeaders.entries) {
-        final key = entry.key.toString();
-        final val = entry.value;
-        if (val is List) {
-          headers[key] = val.map((e) => e.toString()).toList();
-        } else if (val != null) {
-          headers[key] = <String>[val.toString()];
-        }
-      }
-    }
-
-    final bodyB64 = decoded['bodyBase64'] as String? ?? '';
-    final bodyBytes = bodyB64.isEmpty
-        ? Uint8List(0)
-        : (Base64Codec.decode(bodyB64) ?? Uint8List(0));
+    final headers = GatewayResponseDecoder.parseHeaders(decoded['headers']);
+    final bodyBytes = GatewayResponseDecoder.decodeBody(decoded['bodyBase64']);
 
     final now = _clock();
     final cookies = <StoredCookie>[];
@@ -326,6 +294,11 @@ class RelayHttpEngine implements HttpEngine {
       cookies: cookies,
     );
   }
+
+  static const GatewayResponseDecoder _gatewayDecoder = GatewayResponseDecoder(
+    unexpectedResponsePrefix: 'Web 转发网关返回了非预期响应',
+    requestFailedPrefix: 'Web 转发网关请求失败',
+  );
 
   static String _forwardEndpoint(String base) {
     var trimmed = base.trim();

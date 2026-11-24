@@ -2,205 +2,30 @@
  * Serializable RFC 6265 CookieJar persisted inside PortalSessionVault Durable Object.
  */
 
-export const MAX_COOKIE_PAIR_BYTES = 4096;
+import {
+  MAX_COOKIE_PAIR_BYTES,
+  cookieDomainMatch,
+  cookiePathMatch,
+  defaultCookiePath,
+  isPublicSuffixOrInvalidCookieDomain,
+  isValidCookieName,
+  isValidCookieValue,
+  parseSetCookieLine,
+  safeParseUrl,
+} from "./net_policy.js";
+
+export {
+  MAX_COOKIE_PAIR_BYTES,
+  cookieDomainMatch,
+  cookiePathMatch,
+  defaultCookiePath,
+  isPublicSuffixOrInvalidCookieDomain,
+  isValidCookieName,
+  isValidCookieValue,
+  parseSetCookieLine,
+};
+
 export const MAX_JAR_COOKIES = 128;
-
-const TWO_LABEL_PUBLIC_SUFFIXES = new Set([
-  "edu.cn",
-  "ac.cn",
-  "gov.cn",
-  "org.cn",
-  "com.cn",
-  "net.cn",
-  "mil.cn",
-  "edu.hk",
-  "org.hk",
-  "com.hk",
-  "gov.hk",
-  "net.hk",
-  "edu.mo",
-  "gov.mo",
-  "org.mo",
-  "com.mo",
-  "edu.tw",
-  "org.tw",
-  "com.tw",
-  "gov.tw",
-  "net.tw",
-  "ac.uk",
-  "co.uk",
-  "org.uk",
-  "gov.uk",
-  "edu.au",
-  "com.au",
-  "org.au",
-  "gov.au",
-  "ac.jp",
-  "co.jp",
-  "or.jp",
-  "go.jp",
-  "edu.sg",
-  "com.sg",
-  "edu.my",
-  "com.my",
-]);
-
-const IPV4_LITERAL_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
-const INVALID_COOKIE_NAME_RE = /[\x00-\x20\x7f;="(),/:<>?@[\\\]{}]/;
-const INVALID_COOKIE_VALUE_RE = /[\x00-\x1f\x7f;]/;
-
-export function isValidCookieName(name) {
-  return (
-    typeof name === "string" &&
-    name.length > 0 &&
-    !name.startsWith("$") &&
-    !INVALID_COOKIE_NAME_RE.test(name)
-  );
-}
-
-export function isValidCookieValue(value) {
-  return typeof value === "string" && !INVALID_COOKIE_VALUE_RE.test(value);
-}
-
-export function isPublicSuffixOrInvalidCookieDomain(rawDomain) {
-  const domain = String(rawDomain || "")
-    .trim()
-    .replace(/^\.+|\.+$/g, "")
-    .toLowerCase();
-  if (!domain) return true;
-  if (
-    domain === "localhost" ||
-    domain.includes(":") ||
-    domain.startsWith("[") ||
-    IPV4_LITERAL_RE.test(domain)
-  ) {
-    return true;
-  }
-  const labels = domain.split(".");
-  if (labels.length < 2 || labels.some((l) => !l)) {
-    return true;
-  }
-  return TWO_LABEL_PUBLIC_SUFFIXES.has(domain);
-}
-
-export function defaultCookiePath(urlPathname) {
-  if (!urlPathname || !urlPathname.startsWith("/")) return "/";
-  if (urlPathname === "/") return "/";
-  const lastSlash = urlPathname.lastIndexOf("/");
-  if (lastSlash <= 0) return "/";
-  return urlPathname.slice(0, lastSlash);
-}
-
-export function cookieDomainMatch(host, domain) {
-  if (host === domain) return true;
-  if (!domain || host.length <= domain.length) return false;
-  return host.endsWith(domain) && host[host.length - domain.length - 1] === ".";
-}
-
-export function cookiePathMatch(urlPath, cookiePath) {
-  const target = urlPath || "/";
-  if (target === cookiePath) return true;
-  if (!target.startsWith(cookiePath)) return false;
-  if (cookiePath.endsWith("/")) return true;
-  return target.length > cookiePath.length && target[cookiePath.length] === "/";
-}
-
-export function parseSetCookieLine(line, requestUrl, nowMs = Date.now()) {
-  if (typeof line !== "string" && line != null) {
-    line = String(line);
-  }
-  if (!line || /[\r\n\x00]/.test(line)) return null;
-
-  const sourceUrl = requestUrl instanceof URL ? requestUrl : safeParseUrl(requestUrl);
-  if (!sourceUrl) return null;
-
-  const parts = String(line).split(";");
-  const head = parts[0] || "";
-  const eq = head.indexOf("=");
-  if (eq <= 0) return null;
-
-  const name = head.slice(0, eq).trim();
-  if (!isValidCookieName(name)) return null;
-
-  let value = head.slice(eq + 1).trim();
-  while (value.startsWith('"')) value = value.slice(1);
-  while (value.endsWith('"')) value = value.slice(0, -1);
-  if (!isValidCookieValue(value)) return null;
-  if (name.length + value.length > MAX_COOKIE_PAIR_BYTES) return null;
-
-  let attrDomain = null;
-  let attrPath = null;
-  let secure = false;
-  let maxAgeSec = null;
-  let expiresMs = null;
-
-  for (let i = 1; i < parts.length; i++) {
-    const seg = parts[i];
-    const sep = seg.indexOf("=");
-    const attrName = (sep < 0 ? seg : seg.slice(0, sep)).trim().toLowerCase();
-    const attrVal = sep < 0 ? "" : seg.slice(sep + 1).trim();
-    if (attrName === "domain") {
-      const cleaned = attrVal.replace(/^\.+|\.+$/g, "").toLowerCase();
-      if (cleaned) attrDomain = cleaned;
-    } else if (attrName === "path") {
-      if (attrVal.startsWith("/") && !/[\x00-\x1f\x7f;]/.test(attrVal)) {
-        attrPath = attrVal;
-      }
-    } else if (attrName === "secure") {
-      secure = true;
-    } else if (attrName === "max-age") {
-      const parsedSec = Number.parseInt(attrVal, 10);
-      if (!Number.isNaN(parsedSec)) maxAgeSec = parsedSec;
-    } else if (attrName === "expires") {
-      const parsedTime = Date.parse(attrVal);
-      if (!Number.isNaN(parsedTime)) expiresMs = parsedTime;
-    }
-  }
-
-  const reqHost = sourceUrl.hostname.replace(/\.+$/, "").toLowerCase();
-  // RFC 6265 §5.3 Step 5: Reject public-suffix supercookies (unless exact match to request host, which becomes host-only).
-  if (attrDomain !== null && isPublicSuffixOrInvalidCookieDomain(attrDomain)) {
-    if (attrDomain === reqHost) {
-      attrDomain = null;
-    } else {
-      return null;
-    }
-  }
-
-  const hostOnly = attrDomain === null;
-  const domain = attrDomain || reqHost;
-  if (!hostOnly && !cookieDomainMatch(reqHost, domain)) {
-    return null;
-  }
-
-  const effectiveExpiresMs = maxAgeSec !== null
-    ? (maxAgeSec <= 0 ? nowMs - 1000 : nowMs + maxAgeSec * 1000)
-    : expiresMs;
-  const deleted =
-    value.trim().toLowerCase() === "deleteme" ||
-    (effectiveExpiresMs !== null && effectiveExpiresMs <= nowMs);
-
-  return {
-    name,
-    value,
-    domain,
-    path: attrPath || defaultCookiePath(sourceUrl.pathname),
-    hostOnly,
-    secure,
-    expiresMs: effectiveExpiresMs,
-    deleted,
-    seq: 0,
-    updatedSeq: 0,
-  };
-}
-
-function safeParseUrl(raw) {
-  try {
-    return new URL(String(raw));
-  } catch {
-    return null;
-  }
-}
 
 export class ServerCookieJar {
   constructor() {

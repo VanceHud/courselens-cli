@@ -1,3 +1,4 @@
+export 'macos_keychain.dart' show CliKeychain;
 export 'cli_credential_store.dart';
 export 'cli_session_record.dart';
 export 'cookie_har_parser.dart';

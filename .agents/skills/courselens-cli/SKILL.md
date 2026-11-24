@@ -80,6 +80,7 @@ Usable with any subcommand:
 | --- | --- |
 | `--demo` | Run offline against embedded sanitized demo fixtures (works from any CWD) |
 | `--json` | Emit structured JSON on `stdout` (diagnostics/errors stay on `stderr`) |
+| `--no-cache` | Bypass stateful Worker read-only proxy cache and force fresh upstream portal fetch |
 | `--term <term>` | Override academic term (e.g. `2025-2026-1`) |
 | `--relay <url>` | Forward HTTP via stateless relay (`http://127.0.0.1:8787` or Cloudflare Worker URL) |
 | `--worker <name\|url>` | Route via saved gateway alias or stateful Cloudflare Worker session gateway (`workers/session_gateway/`) |
@@ -100,6 +101,7 @@ courselens whoami
 courselens auth status [--offline]
 
 # Bind/save, list, switch, or remove stateful Cloudflare Worker Session Gateways (--api-key on argv is rejected!)
+# Note: env var COURSELENS_API_KEY only applies to the matching COURSELENS_WORKER_URL gateway.
 courselens auth worker \
   --url <https://session.example.workers.dev> [--name <alias>] \
   [--api-key-stdin | --api-key-env <VAR>] [--no-verify]
@@ -126,22 +128,22 @@ courselens auth logout [--keep-workers]
 
 #### Stateless `/cli-auth` Web Credential Bridge (Password-Vault AI Agents)
 
-University portals mark `JSESSIONID` as `HttpOnly`, preventing normal browser scripts (`document.cookie`) from exporting session cookies. If the user has deployed a CourseLens stateless Web relay (`<your-relay-origin>/cli-auth`), it serves a stateless Web Credential Bridge (`GET /cli-auth?url=<portalUrl>[&system=auto|ZF|QZ][&cas=<casUrl>][&relay=1]`) that authenticates in browser memory (`BigInt` RSA PKCS#1 v1.5 / CAS / Qingzhi `scode`) via same-origin `POST /v1/forward` (`hopCookies`) under strict CSP (`connect-src 'self'; form-action 'none'`, `Cache-Control: no-store`) with zero `localStorage` / `sessionStorage` / `indexedDB` / `document.cookie` or server storage.
+University portals mark `JSESSIONID` as `HttpOnly`, preventing normal browser scripts (`document.cookie`) from exporting session cookies. If the user has deployed a CourseLens stateless Web relay (`<your-relay-origin>/cli-auth`), it serves a stateless Web Credential Bridge that authenticates in browser memory (`BigInt` RSA PKCS#1 v1.5 / CAS / Qingzhi `scode`) via same-origin `POST /v1/forward` (`hopCookies`) under strict CSP (`connect-src 'self'; form-action 'none'`, `Cache-Control: no-store`) with zero `localStorage` / `sessionStorage` / `indexedDB` / `document.cookie` or server storage.
 
 This enables **Password-Vault AI Agents** (which store `(URL, username, password)` in an encrypted vault and auto-fill standard HTML login forms without ever exposing plaintext passwords to the LLM):
 
-- **Autofill-Safe DOM Contract**:
-  - Portal configuration controls sit **outside** `#login-form` (`<form id="login-form">`) with `autocomplete="off"` so credential autofill never mis-targets them: `#portal-url` (`?url=`), `#portal-system` (`?system=auto|ZF|QZ`), optional `#cas-url` (`?cas=`), and `#include-relay` (`?relay=1`, appends `--relay '<origin>'` to `#cli-import-cmd`).
+- **Autofill-Safe DOM Contract**: Configure `CLI_AUTH_PORTAL_URL` and optional `CLI_AUTH_CAS_URL` on the relay before autofill (Cloudflare relays also require their origins in `ALLOWED_HOSTS`).
+  - Portal configuration controls sit **outside** `#login-form` (`<form id="login-form">`) with `autocomplete="off"` so credential autofill never mis-targets them: `#portal-url` (configured by the relay), `#portal-system`, optional `#cas-url` (configured by the relay), and `#include-relay` (`?relay=1`, appends `--relay '<origin>'` to `#cli-import-cmd`).
   - `#login-form` (`<form id="login-form">`) contains **only** `#username` (`input[name="username"]`), `#password` (`input[name="password"]`), and `#login-submit` (`button[type="submit"]`).
 - **4-Step Agent Workflow**:
-  1. Navigate to `<your-relay-origin>/cli-auth?url=<portalUrl>`.
+  1. Navigate to `<your-relay-origin>/cli-auth` (or set `CLI_AUTH_PORTAL_URL`, start the local relay, and open `http://127.0.0.1:8787/cli-auth`).
   2. Auto-fill `#username` (`input[name="username"]`) and `#password` (`input[name="password"]`), then submit `#login-submit` (`#password.value` is immediately wiped to `''` from the DOM on submit before network I/O so post-submit screenshots/DOM reads never see the password).
   3. Wait for `#auth-status[data-state="authenticated"]` (`data-state` transitions `idle` -> `working` -> `authenticated` or `error`; `#auth-result` un-hides `#cli-session-meta`, `#cli-cookie-json`, `#cli-import-cmd`, `#copy-json-btn`, and `#copy-cmd-btn`).
-  4. Read `#cli-cookie-json` (JSON cookie map, e.g. `{"JSESSIONID":"..."}`) and pipe it into `courselens auth import-cookie --url <portalUrl> --cookie-stdin` (or run the shell-escaped command in `#cli-import-cmd`).
+  4. Read `#cli-cookie-json` (JSON cookie map, e.g. `{"JSESSIONID":"..."}`) and pipe it into `courselens auth import-cookie --url <portalUrl> --cookie-stdin` (or run the command in `#cli-import-cmd` and paste the JSON at the hidden input prompt).
 
 ### 2. Read-Only Academic Queries
 
-All commands below perform strictly **read-only** requests (`0` exit code on success):
+All commands below perform strictly **read-only** requests (`0` exit code on success); pass `--no-cache` to bypass the Worker proxy cache when fresh upstream data is needed:
 
 ```bash
 # Preferred 1-shot daily briefing: academic week, today & tomorrow classes, exam countdowns
@@ -181,7 +183,7 @@ courselens courses \
 
 ### 3. Stateful Cloud Worker Gateway Commands (`worker`)
 
-When connected to a stateful Cloudflare Worker (`workers/session_gateway/`), manage cloud tasks, dynamic cookie push, Webhooks, and default-OFF grade/exam monitors:
+When connected to a stateful Cloudflare Worker (`workers/session_gateway/`), manage cloud tasks, proxy cache, dynamic cookie push, Webhooks, and default-OFF grade/exam monitors:
 
 ```bash
 # Inspect unified cloud task list & single task detail (metrics, changes, logs)
@@ -192,6 +194,10 @@ courselens worker tasks show <monitor:grades|monitor:exams|session:keepalive>
 courselens worker tasks enable monitor:grades [--interval 1800] [--reset-baseline]
 courselens worker tasks disable monitor:grades
 courselens worker tasks run <taskId> [--confirm]
+
+# Inspect or clear Worker dual-layer read-only proxy cache (use global --no-cache for single-call bypass)
+courselens worker cache [status]
+courselens worker cache clear [--category <catalog|schedule|grades|exams|progress|enrolled|classrooms|static>]
 
 # Push QR/SSO cookies or configure Webhook / monitors (--webhook-secret & --secret on argv are rejected!)
 courselens worker push-cookies (--cookie <hdr> | --cookie-stdin | --har <file.har>) [--url <portalUrl>]
